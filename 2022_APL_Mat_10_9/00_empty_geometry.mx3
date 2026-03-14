@@ -1,0 +1,37 @@
+// ============================================================
+// MUMAX3 — PHASE 1: Geometry Initialization
+// ============================================================
+// Creates an empty cubic simulation volume and saves the blank
+// magnetization state as a starting point for the hopfion
+// configuration loader (Phase 2).
+// ============================================================
+
+// ------------------------------------------------------------
+// 1. GRID & CELL SIZE
+// ------------------------------------------------------------
+// 100×100×100 cells at 2 nm each → 200×200×200 nm physical volume.
+// This is a cube, appropriate for early-stage geometry testing.
+// NOTE: The dynamic simulation (Phase 3) uses a different geometry
+// (cylinder, different dimensions).
+Nx := 100
+Ny := 100
+Nz := 100
+cx := 2e-9
+cy := 2e-9
+cz := 2e-9
+
+SetGridsize(Nx, Ny, Nz)
+SetCellsize(cx, cy, cz)
+
+// ------------------------------------------------------------
+// 2. GEOMETRY
+// ------------------------------------------------------------
+
+system := cuboid(Nx*cx, Ny*cy, Nz*cz) // diameter=200 nm, height=200 nm
+setgeom(system)
+snapshot(geom)
+
+// Save the blank (random) magnetization state under a descriptive filename.
+// This .ovf file is the input for the Python hopfion configuration script.
+// Naming convention: r=100 nm (radius), h=200 nm (height), cell=2 nm.
+saveas(m, "initial_empty_r_100_nm_h_200_nm_c_2nm")

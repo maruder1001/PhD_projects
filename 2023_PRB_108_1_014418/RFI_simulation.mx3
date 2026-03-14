@@ -1,0 +1,225 @@
+// ============================================================
+// MUMAX3 SIMULATION: Spin-Wave Scattering on a Fabry-Perot Interferometer
+// ============================================================
+// This simulation models spin-wave (magnon) propagation through a
+// ferromagnetic waveguide containing a resonator that acts as a
+// Fabry-Perot interferometer — analogous to optical FP cavities,
+// but for spin waves (magnonics).
+// ============================================================
+
+// ------------------------------------------------------------
+// 1. GRID & GEOMETRY SETUP
+// ------------------------------------------------------------
+
+// Number of cells in each spatial direction.
+// The x-axis is the propagation direction of spin waves.
+// Ny=7 gives a narrow waveguide (quasi-1D in x).
+// Nz=1 means the system is effectively 2D (thin film).
+Nx := 18750
+Ny := 7
+Nz := 1
+
+// Physical size of each cell.
+// cx=2 nm is the discretization along the propagation axis.
+// cy=10 nm, cz=100 nm define the cross-section of the waveguide.
+cx :=  2.0e-09
+cy := 10e-09
+cz := 100e-9
+
+setgridsize(Nx, Ny, Nz)
+setcellsize(cx, cy, cz)
+
+// Apply periodic boundary conditions along z with 1024 repetitions.
+// This emulates an infinite film in the z-direction (out-of-plane).
+SetPBC(0, 0, 1024)
+
+// Use the Dormand-Prince RK45 adaptive solver (solver 6) for time integration.
+Setsolver(6)
+
+// ------------------------------------------------------------
+// 2. GEOMETRY DEFINITION
+// ------------------------------------------------------------
+
+// X-position of the microwave antenna (excitation source).
+// Placed slightly off-center toward the positive x-side.
+xAnt := -Nx*cx/2 + 9250e-09
+
+// Width of the antenna: 4 cells (8 nm). Narrow to act as a point-like source.
+antWidth := 4*cx
+
+// Width of the Fabry-Perot resonator element.
+rezWidth := 422.0e-09  // ~422 nm
+
+// Main waveguide layer: a wide rectangle shifted 20 nm in -y.
+// This forms the lower waveguide strip.
+layer1 := rect(Nx*cx, 3*cy).transl(0, -20e-09, 0)
+
+// Resonator: a narrower rectangle shifted +20 nm in y.
+// It sits above the waveguide, forming the FP cavity arm.
+rezonator := rect(rezWidth, 3*cy).transl(-rezWidth/2, 20e-09, 0)
+
+// Combined geometry: waveguide + resonator (logical union).
+g := layer1.add(rezonator)
+
+// Antenna region: intersection of the antenna x-range with the waveguide.
+// Only the waveguide cells under the antenna are selected.
+antenna := xrange(xAnt, xAnt+antWidth).intersect(layer1)
+
+// ------------------------------------------------------------
+// 3. REGION ASSIGNMENTS
+// ------------------------------------------------------------
+// Regions allow assigning different material parameters to different parts.
+
+defregion(1, layer1)    // Region 1: main waveguide
+defregion(2, rezonator) // Region 2: FP resonator
+defregion(3, antenna)   // Region 3: antenna (excitation zone)
+
+setgeom(g)
+
+// Save snapshots of geometry and region map for verification.
+Snapshot(geom)
+Snapshot(regions)
+
+// ------------------------------------------------------------
+// 4. MATERIAL PARAMETERS
+// ------------------------------------------------------------
+
+// Waveguide (Region 1) — high-Msat ferromagnet (e.g., YIG or Permalloy-like).
+Msat.SetRegion(1, 1270e03) // Saturation magnetization [A/m]
+Aex.SetRegion(1, 1.5e-11)  // Exchange stiffness [J/m]
+
+// Antenna region (Region 3) — same material as waveguide.
+// The antenna is part of the waveguide; its material is identical.
+Msat.SetRegion(3, 1270e03)
+Aex.SetRegion(3, 1.5e-11)
+
+// Resonator (Region 2) — different ferromagnet (e.g., lower-Msat material).
+// Lower Msat shifts the spin-wave dispersion, creating the FP cavity effect.
+Msat.SetRegion(2, 760e03)
+Aex.SetRegion(2, 13e-12)
+
+// ------------------------------------------------------------
+// 5. BIAS MAGNETIC FIELD & INITIAL MAGNETIZATION
+// ------------------------------------------------------------
+
+// External bias field along z (out-of-plane), in Tesla.
+// This sets the operating point of the ferromagnetic resonance.
+B0 := 0.10 // T
+B_ext = vector(0, 0, B0)
+
+// Initial magnetization: nearly uniform along z with a tiny tilt in y.
+// The small y-component seeds the dynamics without biasing the result.
+m = uniform(0, 0.01, 1)
+
+// Save initial Msat distribution for verification.
+snapshot(Msat)
+
+// ------------------------------------------------------------
+// 6. ABSORBING BOUNDARY CONDITIONS (ABC)
+// ------------------------------------------------------------
+// To prevent spin-wave reflections from the edges of the finite simulation
+// domain, a gradual damping ramp is applied near both x-boundaries.
+// This mimics an absorbing boundary (perfectly matched layer, PML-like).
+
+alpha0 := 0.0002  // Background (physical) Gilbert damping coefficient
+
+grad := 250       // Number of damping gradient steps
+gr_step := 18     // Width of each step in cells
+
+// Temporary shape variables for building the left/right damping zones.
+grad_left  := xrange(1,0)  // Initially empty range (placeholder)
+grad_right := xrange(1,0)
+grad0      := xrange(1,0)
+
+// Loop over gradient steps, starting at i=4 to leave a small undamped margin.
+for i:=4; i<(grad+4); i++ {
+
+    // Left absorbing zone: steps grow inward from the left edge.
+    grad_left = xrange(
+        (-(Nx*cx/2)+gr_step*(grad)*cx-gr_step*(i+1)*cx),
+        (-(Nx*cx/2)+gr_step*(grad)*cx-gr_step*i*cx) )
+
+    // Right absorbing zone: symmetric, growing inward from the right edge.
+    grad_right = xrange(
+        ((Nx*cx/2)-gr_step*(grad)*cx+gr_step*i*cx),
+        ((Nx*cx/2)-gr_step*(grad)*cx+gr_step*(i+1)*cx) )
+
+    // Union of left and right damping strips, masked to the waveguide.
+    grad0 = grad_right.add(grad_left)
+    grad0 = grad0.intersect(layer1)
+
+    // Assign a unique region index to each damping strip (starting at i=4).
+    DefRegion(i, grad0)
+
+    // Quadratic damping profile: increases steeply toward the boundary.
+    // dmp = alpha0 + 0.5 * ((i-3)/grad)^2
+    dmp := alpha0 + 0.5*((i-3)/grad)*((i-3)/grad)
+    alpha.setRegion(i, dmp)
+
+    // Damping regions retain the same magnetic material as the waveguide.
+    Msat.SetRegion(i, 1270e03)
+    Aex.SetRegion(i, 1.5e-11)
+}
+
+// Set physical damping for the default (unassigned) region and waveguide region.
+alpha.setRegion(0, alpha0)
+alpha.setRegion(1, alpha0)
+
+// Save snapshots of damping and Msat maps after ABC setup.
+Snapshot(alpha)
+snapshot(Msat)
+
+// ------------------------------------------------------------
+// 7. RELAXATION (find equilibrium state)
+// ------------------------------------------------------------
+// Let the magnetization relax to the static ground state before
+// applying dynamic excitation. This removes transients from initialization.
+relax()
+snapshot(m) // Save the relaxed magnetization state
+
+// ------------------------------------------------------------
+// 8. DYNAMIC EXCITATION — ANTENNA RF FIELD
+// ------------------------------------------------------------
+
+// Excitation frequency (spin-wave carrier frequency).
+f0 := 17e09  // 17 GHz
+
+// Apply a sinusoidal RF field only in the antenna region (Region 3).
+// The small amplitude (0.001*B0) drives linear spin-wave excitation.
+// The z-component maintains the bias field.
+B_ext.SetRegion(3, vector(0.001*B0*sin(2*pi*f0*t), 0, B0))
+
+// Adaptive time-step bounds for accurate resolution of the RF cycle.
+MaxDt = 1/f0 / 100   // ~100 steps per RF period (T ≈ 8.33 ps)
+MinDt = 1/f0 / 2000  // Minimum allowed time step
+MaxErr = 0.05e-06     // Magnetization error tolerance per step
+
+// ------------------------------------------------------------
+// 9. SIMULATION PHASES
+// ------------------------------------------------------------
+
+// --- Phase 1: Transient run ---
+// Run for 9×10⁻⁸ s (~90 ns) to allow spin waves to fill the waveguide
+// and reach the resonator. Auto-snapshot mx every half RF period.
+autosnapshot(m.comp(0), pi/f0)
+run(9*1e-08)
+
+// --- Phase 2: Steady-state approach ---
+// Switch to finer sampling at 1/(f0*N) intervals (N=20 points per period).
+// This phase allows the system to settle into steady-state oscillation.
+N := 20
+t_sample := 1/(f0*N)      // Sampling interval ≈ 2.94 ps
+MaxDt = t_sample/20        // Very fine time steps during data collection
+
+// autosave(m.comp(0), t_sample)  // [disabled] steady-state sampling pass 1
+run(2*N*t_sample)           // Run for exactly 2 full RF periods
+
+// autosave(m.comp(0), 2*1e-08)   // [disabled] alternative longer run
+run(1e-08)                  // Short additional settling run (~10 ns)
+
+// --- Phase 3: Data collection ---
+// Save mx (x-component of magnetization) at every sampling point.
+// This captures the spin-wave amplitude and phase for post-processing
+// (e.g., FFT to extract transmission spectrum of the FP interferometer).
+autosave(m.comp(0), t_sample)
+run(2*N*t_sample)           // Final data collection: exactly 2 RF periods
