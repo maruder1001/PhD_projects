@@ -1,0 +1,361 @@
+// ============================================================
+// Mumax3 Simulation: Spin-Wave Beam Scattering on an Edge Mode
+// Py (Permalloy) layer with magnetic inhomogeneity at the edge
+//
+// A focused SW beam (45 GHz, propagating at 30° to the x-axis)
+// is launched into the waveguide and impinges on a localised
+// edge mode (13 GHz) pinned at the right boundary.
+// The steady-state mz(x,y,t) data is saved for post-processing
+// (e.g. spatial FFT or direct visualisation of the scattering).
+//
+// Grid: 1024 x 2048 x 1 cells | Cell size: 5 x 5 x 10 nm
+// Bias field: B0 = 0.3 T along x
+// ============================================================
+
+
+// ============================================================
+// SECTION 1: GRID AND GEOMETRY SETUP
+// ============================================================
+
+// Number of simulation cells along each axis
+Nx := 1024   // x-direction (transverse to waveguide)
+Ny := 2048   // y-direction (propagation axis — longest dimension)
+Nz := 1      // single-layer (quasi-2D simulation)
+
+// Physical size of each cell [m]
+cx := 5e-09    // 5 nm in x
+cy := 5e-09    // 5 nm in y
+cz := 10e-09   // 10 nm in z (effective thickness of the Py layer)
+
+// Apply the grid and cell sizes to the solver
+setgridsize(Nx, Ny, Nz)
+setcellsize(cx, cy, cz)
+
+// Periodic boundary conditions along y only.
+// The y-PBC avoids artificial edge effects along the propagation direction;
+// the ABC (see Section 4) handles absorption at the physical y-boundaries.
+SetPBC(0, 1, 0)
+
+
+// ============================================================
+// SECTION 2: GEOMETRY DEFINITION
+// ============================================================
+
+// Single rectangular slab spanning the full simulation volume
+square1 := cuboid(Nx*cx, Ny*cy, Nz*cz)
+
+// Assign to magnetic region 1
+defregion(1, square1)
+setgeom(square1)
+
+// Save geometry and region map snapshots for reference
+Snapshot(geom)
+Snapshot(regions)
+
+
+// ============================================================
+// SECTION 3: MATERIAL PARAMETERS (Permalloy / Py)
+// ============================================================
+
+Ms_1   := 800e03   // Saturation magnetization [A/m]  — standard Py value
+Aex_1  := 13e-12   // Exchange stiffness [J/m]         — standard Py value
+Dind_1 := 0e-3     // DMI constant [J/m²]              — zero (no DMI in Py)
+
+// Assign material parameters to the main magnetic region
+Msat.SetRegion(1, Ms_1)
+Aex.SetRegion(1, Aex_1)
+Dind.SetRegion(1, Dind_1)
+
+
+// ============================================================
+// SECTION 4: BIAS FIELD AND INITIAL MAGNETIZATION
+// ============================================================
+
+// Small perturbation to break perfect symmetry (prevents solver degeneracy)
+addition := 1e-6
+
+// Bias field magnitude [T]
+B0 := 0.3
+
+// Applied field: predominantly along x, tiny y-component for symmetry breaking
+B_ext = vector(B0-addition, addition, 0)
+
+// Initial uniform magnetization (nearly along x)
+m = uniform(1-addition, addition, 0)
+
+
+// ============================================================
+// SECTION 5: ABSORBING BOUNDARY CONDITIONS (ABC)
+// ============================================================
+// A graded damping layer is built near the top (y+), bottom (y−),
+// left (x−) and right (x+) boundaries to absorb outgoing spin waves
+// and prevent unphysical reflections back into the active region.
+//
+// The ABC is divided into 'grad' = 60 concentric layers.
+// Each layer is 'gr_step' = 2 cells wide.
+// The damping increases quadratically with distance into the absorber:
+//   alpha(i) = alpha0 + 0.5 * (i/grad)^2
+//
+// NOTE: grad_edgeM and the line "grad0 = grad0.add(grad_edgeM)"
+// are currently commented out. They would add an additional ABC
+// strip along the right edge near the edge-mode excitation point,
+// but this is disabled for the present simulation.
+// ============================================================
+
+// --- ABC region placeholders (empty ranges, filled in the loop) ---
+grad_up    := yrange(1, 0)
+grad_down  := yrange(1, 0)
+grad_left  := xrange(1, 0)
+grad_right := xrange(1, 0)
+grad0      := xrange(1, 0)
+grad_edgeM := xrange(1, 0)   // optional extra strip near the edge mode (disabled)
+
+grad    := 60   // total number of ABC damping layers
+gr_step := 2    // width of each layer in cells
+
+// Build the ABC regions layer by layer
+for i := 2; i < (grad+2); i++ {
+
+    // Top boundary strip (positive y edge)
+    grad_up = yrange( (Ny*cy/2) - gr_step*grad*cx + i*gr_step*cx,
+                      (Ny*cy/2) - gr_step*grad*cy + gr_step*(i+1)*cy )
+
+    // Bottom boundary strip (negative y edge)
+    grad_down = yrange( -(Ny*cy/2) + gr_step*grad*cy - gr_step*(i+1)*cy,
+                        -(Ny*cy/2) + gr_step*grad*cy - gr_step*i*cy )
+
+    // Left boundary strip (negative x edge)
+    grad_left = xrange( -(Nx*cx/2) + gr_step*grad*cx - gr_step*(i+1)*cx,
+                        -(Nx*cx/2) + gr_step*grad*cx - gr_step*i*cx )
+
+    // Right boundary strip (positive x edge)
+    grad_right = xrange( (Nx*cx/2) - gr_step*grad*cx + gr_step*i*cx,
+                         (Nx*cx/2) - gr_step*grad*cx + gr_step*(i+1)*cx )
+
+    // Optional: narrow strip along the right edge near the edge-mode antenna
+    // (intersected with the lower 600-cell y-band) — currently disabled
+    grad_edgeM = xrange( (Nx*cx/2) - 25.e-09 - 2*(i+1)*cx,
+                         (Nx*cx/2) - 25.e-09 - 2*i*cx )
+    grad_edgeM = grad_edgeM.intersect(yrange((-Ny/2*cy), -(Ny/2*cy) + 600*5e-09))
+
+    // Combine top, bottom, and left strips into a single absorber region
+    // (grad_edgeM is excluded: "grad0 = grad0.add(grad_edgeM)" is commented out)
+    grad0 = grad_up.add(grad_down.add(grad_left))
+
+    // Assign combined absorber geometry to region index i
+    DefRegion(i, grad0)
+}
+
+// Save snapshot of all defined regions (active + ABC layers)
+snapshot(regions)
+
+
+// --- Assign quadratically increasing damping to each ABC layer ---
+alpha0 := 0.0001   // Very low baseline Gilbert damping (Py-like, nearly undamped)
+alpha  = alpha0    // Set uniform damping as the global default
+
+for i := 2; i < (grad+2); i++ {
+    // Quadratic damping profile: rises from alpha0 to ~0.5 at the outermost layer
+    dmp := alpha0 + 0.5*(i/grad)*(i/grad)
+    alpha.setRegion(i, dmp)
+
+    // Maintain the same magnetic material in the absorber regions
+    Msat.SetRegion(i, Ms_1)
+    Aex.SetRegion(i, Aex_1)
+    Dind.SetRegion(i, Dind_1)
+}
+
+// Ensure default region (0) and main magnetic region (1) use the low baseline damping
+alpha.setRegion(0, alpha0)
+alpha.setRegion(1, alpha0)
+
+// Save material parameter snapshots for post-run verification
+snapshot(alpha)
+snapshot(Msat)
+snapshot(Aex)
+snapshot(Dind)
+
+
+// ============================================================
+// SECTION 6: STATIC EQUILIBRIUM — RELAXATION
+// ============================================================
+
+// Find the lowest-energy magnetization configuration.
+// 'relax()' uses the conjugate-gradient method (no time integration).
+relax()
+
+// Save the equilibrium magnetization and the static demagnetisation field
+snapshot(m)
+Save(B_demag)
+
+
+// ============================================================
+// SECTION 7: EXCITATION MASKS
+// ============================================================
+// Two types of excitation are defined:
+//   (A) A focused spin-wave BEAM antenna at 45 GHz, tilted 30° from the x-axis,
+//       using a Gaussian envelope in the transverse direction and a hard-edge
+//       (Heaviside) cutoff along the beam axis. Both sin and cos quadratures
+//       are used so that the phase of the beam is well defined.
+//   (B) A localised EDGE MODE antenna at 13 GHz, placed at the right boundary
+//       of the waveguide, modelled as a narrow Gaussian spot (σ ≈ 3 cells).
+//       This represents a magnetic inhomogeneity pinning an edge spin-wave mode.
+// ============================================================
+
+// --- (A) SW beam parameters ---
+f0         := 45e9                    // Beam carrier frequency [Hz]
+omega      := 2*pi*f0                 // Angular frequency [rad/s]
+k0         := 175.7575878787879e6     // Wavevector magnitude [rad/m] (from dispersion relation)
+wavelength := 2*pi/k0                 // SW wavelength [m]
+antWidth   := 10*wavelength           // Antenna width along beam axis (10 λ)
+antLength  := 9*wavelength            // Gaussian beam waist in transverse direction (9 λ)
+stimAmp    := 0.01*B0                 // Excitation amplitude: 1% of the bias field [T]
+theta      := 30*(pi/180)             // Beam tilt angle: 30° [rad]
+
+// --- (B) Edge mode parameters ---
+f_edge     := 13.0e09                 // Edge mode frequency [Hz]
+omega_edge := 2*pi*f_edge             // Edge mode angular frequency [rad/s]
+x00        := Nx*cx/2                 // x-position: right edge of the simulation [m]
+y00        := -(3/8)*Ny*cy            // y-position: 3/8 of the way from the bottom [m]
+sgm2       := 3.0*cx                  // Gaussian spot radius of the edge antenna (~15 nm)
+
+// Allocate spatial mask arrays (3-component vector field at every cell)
+field_1   := newVectorMask(Nx, Ny, Nz)   // sin-quadrature beam mask
+field_2   := newVectorMask(Nx, Ny, Nz)   // cos-quadrature beam mask
+edge_mode := newVectorMask(Nx, Ny, Nz)   // edge mode excitation mask
+
+// Populate masks cell by cell
+for i := 0; i < Nx; i++ {
+    for j := 0; j < Ny; j++ {
+        for k := 0; k < Nz; k++ {
+
+            // Physical coordinates of cell (i, j, k) [m]
+            r := index2coord(i, j, k)
+            x := r.x()
+            y := r.y()
+            z := r.z()
+
+
+            // --------------------------------------------------
+            // (A) SPIN-WAVE BEAM ANTENNA
+            // --------------------------------------------------
+            // Rotate the coordinate frame by angle theta so that the
+            // beam propagates along the rotated x_i axis.
+            // The antenna is centred at x = -(1/4)*Nx*cx (left quarter of the grid).
+            //
+            // x_i: coordinate along the beam propagation direction
+            // y_i: coordinate transverse to the beam
+
+            x_i :=  (x + (1/4)*Nx*cx)*cos(theta) + (y - y00)*sin(theta)
+            y_i := -(x + (1/4)*Nx*cx)*sin(theta) + (y - y00)*cos(theta)
+
+            // Gaussian envelope in the transverse (y_i) direction
+            gauss_y := exp(-pow(y_i, 2) / (2*pow(antLength, 2)))
+
+            // Sinusoidal carrier along x_i, multiplied by Gaussian and
+            // hard-edge Heaviside window to confine the beam spatially.
+            // field_1: sin-quadrature (used together with field_2 to form
+            //          a travelling wave with well-defined phase)
+            field_1.setVector(i, j, k, vector(0, 0,
+                stimAmp * sin(k0*x_i) * gauss_y *
+                heaviside(-x_i + antWidth/2) * heaviside(x_i + antWidth/2) ))
+
+            // field_2: cos-quadrature
+            field_2.setVector(i, j, k, vector(0, 0,
+                stimAmp * cos(k0*x_i) * gauss_y *
+                heaviside(-x_i + antWidth/2) * heaviside(x_i + antWidth/2) ))
+
+
+            // --------------------------------------------------
+            // (B) SPIN-WAVE EDGE MODE ANTENNA
+            // --------------------------------------------------
+            // A tightly focused Gaussian spot at position (x00, -y00)
+            // representing the localised magnetic inhomogeneity at the edge.
+            // rho: radial distance from the antenna centre.
+            // Cells where the Gaussian drops below 5% are zeroed out to
+            // keep the mask sparse and avoid exciting the bulk inadvertently.
+
+            rho     := sqrt(pow(x - (1/2)*Nx*cx, 2) + pow(y + y00, 2))
+            gauss_yy := exp(-pow(rho, 2) / (2*pow(sgm2, 2)))
+
+            // Hard threshold: ignore very small contributions
+            if (gauss_yy < 0.05) {
+                gauss_yy = 0.0
+            }
+
+            // Edge mode excitation (z-component of the rf field)
+            edge_mode.setVector(i, j, k, vector(0, 0, stimAmp*gauss_yy))
+
+        }
+    }
+}
+
+
+// ============================================================
+// SECTION 8: MASK GEOMETRY VERIFICATION
+// ============================================================
+// Temporarily add all three masks (with unit scale) to B_ext to
+// produce a snapshot of the combined excitation pattern, then
+// immediately remove them so they do not bias the relaxed state.
+
+B_ext.add(field_1,   1)
+B_ext.add(field_2,   1)
+B_ext.add(edge_mode, 1)
+Snapshot(B_ext.comp(2))    // save Bz snapshot showing excitation footprint
+B_ext.add(field_1,   -1)   // remove beam sin-quadrature
+B_ext.add(field_2,   -1)   // remove beam cos-quadrature
+B_ext.add(edge_mode, -1)   // remove edge mode spot
+
+
+// ============================================================
+// SECTION 9: TIME-DEPENDENT EXCITATION — SLOW TURN-ON
+// ============================================================
+// Each antenna is driven at its own frequency with a smooth
+// exponential turn-on envelope  (1 - exp(-α·ω·t)) to avoid
+// broadband transient excitation at t = 0.
+//
+// SW beam (45 GHz):
+//   Turn-on time constant: 1/(0.001·ω) ≈ 3.5 ns
+//   sin- and cos-quadrature fields are applied simultaneously,
+//   producing a circularly-polarised rf drive that efficiently
+//   excites a single propagation direction.
+//
+// Edge mode (13 GHz):
+//   Turn-on time constant: 1/(0.003·ω_edge) ≈ 3.9 ns
+//   (faster relative turn-on at the lower frequency)
+
+t0 := 1/f0   // one period of the beam frequency (reference time scale)
+
+// Beam excitation: circularly-polarised drive at frequency f0
+B_ext.add(field_1, sin(omega*t)     * (1 - exp(-0.001*t*omega      )))
+B_ext.add(field_2, cos(omega*t)     * (1 - exp(-0.001*t*omega      )))
+
+// Edge mode excitation: linearly-polarised (z-component only) at f_edge
+B_ext.add(edge_mode, sin(omega_edge*t) * (1 - exp(-0.003*t*omega_edge)))
+
+
+// ============================================================
+// SECTION 10: TIME-DOMAIN SIMULATION — SW BEAM SCATTERING
+// ============================================================
+
+// Sampling interval for saved output [s]: 5 ps
+t_sampl := 5e-12
+
+// Adaptive solver error tolerance (no hard MaxDt/MinDt set here;
+// those lines are commented out to let the solver choose freely during
+// the long turn-on phase)
+MaxErr = 0.05e-06
+
+// --- Phase 1: Turn-on and initial propagation (240 ns) ---
+// A coarse snapshot every 3 ns (300e-11 s) is saved to monitor
+// whether the beam has reached steady state and is impinging on the edge.
+autoSnapshot(m.comp(2), 300.0e-11)
+run(240.0e-9)   // run for 240 ns — long enough for the slow turn-on and for
+                // the beam to cross the full waveguide and scatter off the edge mode
+
+// --- Phase 2: Steady-state data collection (800 × 5 ps = 4 ns) ---
+// After the transient has died away, tighten the time step and
+// save mz at every sampling interval for quantitative analysis.
+MaxDt = t_sampl / 100       // maximum solver step: t_sampl / 100 ≈ 50 fs
+autosave(m.comp(2), t_sampl) // save mz every 5 ps
+run(800*t_sampl)             // collect 800 frames = 4 ns of steady-state data

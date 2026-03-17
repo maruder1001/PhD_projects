@@ -1,0 +1,374 @@
+// =============================================================================
+// Spin-Wave Wavepacket Excitation of a Magnonic Gires-Tournois Interferometer
+// =============================================================================
+//
+// Description:
+//   This script simulates the oblique incidence of a spin-wave (SW) wavepacket
+//   onto a magnonic Gires-Tournois interferometer (GTI) resonator. In contrast
+//   to the continuous-wave simulation (script 02), the excitation here is a
+//   finite Gaussian wavepacket in both space and time. This allows observation
+//   of the GTI eigenmode ring-down after the driving pulse has passed —
+//   isolating the freely oscillating resonator response from the forced one.
+//
+//   The wavepacket is centred at t_centre = 1500·T₀ (well into the simulation)
+//   and has a very narrow frequency bandwidth (c_w = 0.05 % of ω₀), which
+//   corresponds to a long temporal envelope and therefore a spatially extended
+//   wavepacket. After the packet passes the resonator, any remaining oscillation
+//   in region 2 is the signature of the eigenmode excited by the GTI mechanism.
+//
+// Key differences from script 02:
+//   - Temporal envelope: Gaussian exp(−(t − t_centre)²/4b₁) instead of
+//     the slow ramp-up (1 − e^{−0.1ωt}); the excitation is therefore finite
+//     in time and the system is not continuously pumped.
+//   - Narrower frequency bandwidth: c_w = 0.0005·ω₀  (was 0.05·ω₀),
+//     producing a near-monochromatic, spatially long wavepacket.
+//   - Wider antenna aperture: antWidth = 40·cx = 200 nm  (was 6·cx = 30 nm),
+//     yielding a well-collimated beam with tighter k-space spread.
+//   - Higher resonator Ms: Ms_2 = 590 kA/m  (was 355 kA/m), shifting the
+//     resonator's eigenfrequency to match f₀ = 17.4 GHz at this field.
+//   - Single simulation phase: the entire run is 2500·T₀ with mx saved every
+//     period, capturing both the wavepacket transit and the eigenmode ring-down.
+//
+// Geometry:
+//   - Layer     (region 1): wide continuous film, Ms = 1200 kA/m (CoFeB-like)
+//   - Resonator (region 2): narrow strip on top,  Ms =  590 kA/m (YIG-like)
+//
+// Absorbing Boundary Conditions:
+//   - Quadratically graded damping at the top (y+), bottom (y−), and left (x−)
+//     edges, applied separately to each material layer.
+//   - Profile: α(i) = α₀ + 0.5·((i−3)/grad)²
+//
+// Output:
+//   - Snapshots of geometry, regions, Msat, alpha, and B_ext mask profiles
+//   - autosnapshot and autosave of mx every oscillation period T₀ for the
+//     full 2500-period run (time-resolved wavepacket + ring-down dynamics)
+//
+//
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 1. SIMULATION GRID
+// -----------------------------------------------------------------------------
+
+Nx := 2560    // Number of cells along x — wide to accommodate the tilted beam
+Ny := 2048    // Number of cells along y (propagation / long axis)
+Nz := 3       // Number of cells along z (3 layers: vacuum | resonator | layer)
+
+cx := 5e-9    // Cell size along x [m] = 5 nm
+cy := 5e-9    // Cell size along y [m] = 5 nm
+cz := 5e-9    // Cell size along z [m] = 5 nm
+
+setgridsize(Nx, Ny, Nz)
+setcellsize(cx, cy, cz)
+
+// Periodic boundary conditions along y; remaining edges handled by ABCs below.
+SetPBC(0, 1, 0)
+
+
+// -----------------------------------------------------------------------------
+// 2. GEOMETRY DEFINITION
+// -----------------------------------------------------------------------------
+
+lam_yig := 155e-9   // Resonator strip width [m] = 155 nm
+
+// Layer (region 1): full-width film at the bottom z-layer (z = −cz)
+square1 := cuboid(Nx*cx, Ny*cy, cz).transl(0, 0, -1*cz)
+
+// Resonator (region 2): narrow strip centred along x, at the top z-layer (z = +cz)
+square2 := cuboid(lam_yig, Ny*cy, cz).transl((Nx*cx-lam_yig)/2, 0, 1*cz)
+
+// Combined geometry: layer + resonator strip
+g := square1.add(square2)
+
+defregion(1, square1)
+defregion(2, square2)
+setgeom(g)
+
+Snapshot(geom)
+Snapshot(regions)
+
+
+// -----------------------------------------------------------------------------
+// 3. MATERIAL PARAMETERS
+// -----------------------------------------------------------------------------
+
+// --- Layer (region 1) — CoFeB-like high-Ms film ---
+Ms_1   := 1200e3   // Saturation magnetisation [A/m]
+Aex_1  := 15e-12   // Exchange stiffness [J/m]
+Dind_1 := 0e-3     // Interfacial DMI [J/m²] (disabled)
+
+// --- Resonator (region 2) — YIG-like strip ---
+// Ms_2 = 590 kA/m is chosen so that the resonator eigenfrequency coincides
+// with the incident wavepacket frequency f₀ = 17.4 GHz at B₀ = 10 mT.
+Ms_2   := 590e3    // Saturation magnetisation [A/m]
+Aex_2  := 3.7e-12  // Exchange stiffness [J/m]
+Dind_2 := 0e-3     // Interfacial DMI [J/m²] (disabled)
+
+Msat.SetRegion(1, Ms_1)
+Aex.SetRegion(1, Aex_1)
+Dind.SetRegion(1, Dind_1)
+
+Msat.SetRegion(2, Ms_2)
+Aex.SetRegion(2, Aex_2)
+Dind.SetRegion(2, Dind_2)
+
+
+// -----------------------------------------------------------------------------
+// 4. INITIAL CONDITIONS AND FIRST RELAXATION
+// -----------------------------------------------------------------------------
+
+B0    := 10e-3              // Static bias field magnitude [T]
+B_ext  = vector(0, B0, 0)  // Bias field along y (Damon-Eshbach geometry)
+
+// Slightly tilted initial magnetisation to break symmetry and aid convergence
+m = uniform(0, 1, 0.01)
+
+snapshot(Msat)
+relax()
+snapshot(m)
+
+
+// -----------------------------------------------------------------------------
+// 5. ABSORBING BOUNDARY CONDITIONS (graded damping)
+// -----------------------------------------------------------------------------
+//
+// Quadratically increasing damping is applied in 'grad' concentric shells at
+// the top (y+), bottom (y−), and left (x−) boundaries. Shells are defined
+// separately for the layer and the resonator to preserve material contrast.
+//
+// Damping profile for shell i (i = 3 … grad+2):
+//   α(i) = α₀ + 0.5 · ((i−3) / grad)²
+//
+// Region indices:
+//   3      … grad+2      → absorbing shells in the layer      (region 1 material)
+//   grad+3 … 2·grad+2   → absorbing shells in the resonator  (region 2 material)
+
+alpha0  := 0.00042   // Baseline Gilbert damping (bulk interior)
+grad    := 25        // Number of absorbing shells
+gr_step := 5         // Width of each shell [cells]
+
+// Initialise empty ranges (overwritten in each loop iteration)
+grad_up    := yrange(1, 0)
+grad_down  := yrange(1, 0)
+grad_left  := xrange(1, 0)
+grad_right := xrange(1, 0)
+grad0      := xrange(1, 0)
+
+// --- Absorbing shells for the layer (region 1 material) ---
+for i := 3; i < (grad + 3); i++ {
+
+    // Top edge absorber: band near y = +Ny·cy/2
+    grad_up = yrange(
+        (Ny*cy/2) - gr_step*float(grad)*cx + float(i)*gr_step*cx,
+        (Ny*cy/2) - gr_step*float(grad)*cy + gr_step*float(i+1)*cy)
+
+    // Bottom edge absorber: band near y = −Ny·cy/2
+    grad_down = yrange(
+        -(Ny*cy/2) + gr_step*float(grad)*cy - gr_step*float(i+1)*cy,
+        -(Ny*cy/2) + gr_step*float(grad)*cy - gr_step*float(i)*cy)
+
+    // Left edge absorber: band near x = −Nx·cx/2
+    grad_left = xrange(
+        -(Nx*cx/2) + gr_step*float(grad)*cx - gr_step*float(i+1)*cx,
+        -(Nx*cx/2) + gr_step*float(grad)*cx - gr_step*float(i)*cx)
+
+    // Union of the three boundary bands, clipped to the layer geometry
+    grad0 = grad_up.add(grad_down.add(grad_left))
+    grad0 = grad0.intersect(square1)
+    DefRegion(i, grad0)
+
+    // Quadratic ramp: α₀ at inner edge → ~0.5 + α₀ at outer edge
+    dmp := alpha0 + 0.5*((i-3)/grad)*((i-3)/grad)
+    alpha.setRegion(i, dmp)
+
+    // Layer material properties for these absorbing shells
+    Msat.SetRegion(i, Ms_1)
+    Aex.SetRegion(i, Aex_1)
+    Dind.SetRegion(i, Dind_1)
+}
+
+Snapshot(regions)
+
+// --- Absorbing shells for the resonator (region 2 material) ---
+for i := 3; i < (grad + 3); i++ {
+
+    grad_up = yrange(
+        (Ny*cy/2) - gr_step*float(grad)*cx + float(i)*gr_step*cx,
+        (Ny*cy/2) - gr_step*float(grad)*cy + gr_step*float(i+1)*cy)
+
+    grad_down = yrange(
+        -(Ny*cy/2) + gr_step*float(grad)*cy - gr_step*float(i+1)*cy,
+        -(Ny*cy/2) + gr_step*float(grad)*cy - gr_step*float(i)*cy)
+
+    grad_left = xrange(
+        -(Nx*cx/2) + gr_step*float(grad)*cx - gr_step*float(i+1)*cx,
+        -(Nx*cx/2) + gr_step*float(grad)*cx - gr_step*float(i)*cx)
+
+    grad0 = grad_up.add(grad_down.add(grad_left))
+    grad0 = grad0.intersect(square2)
+    DefRegion(grad+3+i, grad0)
+
+    dmp := alpha0 + 0.5*((i-3)/grad)*((i-3)/grad)
+    alpha.setRegion(grad+3+i, dmp)
+
+    // Resonator material properties for these absorbing shells
+    Msat.SetRegion(grad+3+i, Ms_2)
+    Aex.SetRegion(grad+3+i, Aex_2)
+    Dind.SetRegion(grad+3+i, Dind_2)
+}
+
+Snapshot(regions)
+
+// Apply baseline damping to the bulk (non-absorbing) interior regions
+alpha.setRegion(0, alpha0)
+alpha.setRegion(1, alpha0)
+alpha.setRegion(2, alpha0)
+
+Snapshot(alpha)
+Save(alpha)
+snapshot(Msat)
+
+// Second relaxation after the full damping map is set
+relax()
+
+
+// -----------------------------------------------------------------------------
+// 6. WAVEPACKET / ANTENNA PARAMETERS
+// -----------------------------------------------------------------------------
+
+// The incident wavepacket is centred on (k₀, f₀), matching the dispersion
+// relation of the layer at the chosen operating point.
+k0    := 60.95585102783619e6   // Central wave vector [rad/m] ≈ 61 Mrad/m
+f0    := 17.4e9                // Central frequency [Hz] = 17.4 GHz
+omega := 2*pi*f0               // Angular frequency [rad/s]
+
+stimAmp := 0.01 * B0           // Excitation amplitude [T] = 1 % of bias field
+
+// Spatial beam profile: Gaussian width in k-space (5 % of k₀)
+// → broad real-space beam with well-defined direction
+c_k1 := 0.05 * k0
+c_k2 := 0.05 * k0
+a_1  := 1 / (2*pow(c_k1, 2))   // Real-space Gaussian width along beam x' [m²]
+a_2  := 1 / (2*pow(c_k2, 2))   // Real-space Gaussian width along beam y' [m²]
+
+// Temporal envelope: very narrow frequency bandwidth (0.05 % of ω₀)
+// → long temporal wavepacket; near-monochromatic but finite in time
+// This is the key difference from script 02: the wavepacket eventually
+// passes the resonator entirely, after which only the eigenmode ring-down remains.
+c_w := 0.0005 * omega
+b_1 := 1 / (2*pow(c_w, 2))     // Temporal Gaussian width parameter [s²]
+
+// Beam incidence angle (measured from the y-axis, i.e. from the resonator normal)
+theta := -45.0 * (pi / 180)    // θ = −45° → oblique incidence
+
+
+// -----------------------------------------------------------------------------
+// 7. EXCITATION FIELD MASKS (spatial beam profile)
+// -----------------------------------------------------------------------------
+//
+// Two complementary vector masks encode the spatial profile of the beam:
+//   field_1: Bx = stimAmp · sin(k₀·x') · gauss(y') · rect(x')
+//   field_2: Bx = stimAmp · cos(k₀·x') · gauss(y') · rect(x')
+//
+// x' and y' are beam-frame coordinates (rotated by θ from the lab frame).
+// rect(x') = heaviside(antWidth/2 − x') · heaviside(antWidth/2 + x')
+//   limits the aperture to antWidth = 40 cells = 200 nm in the transverse
+//   direction. This is wider than in script 02 (6 cells), giving a more
+//   collimated, well-defined beam with smaller angular spread.
+//
+// At runtime the masks are combined as:
+//   B_ext += field_1·sin(ωt)·env(t) + field_2·cos(ωt)·env(t)
+//          = stimAmp · cos(k₀·x' − ωt) · env(t)
+// where env(t) = exp(−(t − t_centre)²/4b₁) is the Gaussian temporal envelope.
+
+field_1 := newVectorMask(Nx, Ny, Nz)
+field_2 := newVectorMask(Nx, Ny, Nz)
+
+antWidth := 40 * cx   // Antenna aperture width [m] = 200 nm (40 cells)
+
+for i := 0; i < Nx; i++ {
+    for j := 0; j < Ny; j++ {
+        for k := 0; k < Nz; k++ {
+
+            r := index2coord(i, j, k)   // Physical cell coordinates [m]
+            x := r.x()
+            y := r.y()
+
+            // Rotate to beam frame; origin offset places the antenna in the
+            // lower-left quadrant so the 45° beam crosses the full domain
+            // before reaching the resonator.
+            x_i :=  (x + (1.0/3)*Nx*cx)*cos(theta) + (y - (1.0/4)*Ny*cy - 200*cy)*sin(theta)
+            y_i := -(x + (1.0/3)*Nx*cx)*sin(theta) + (y - (1.0/4)*Ny*cy - 200*cy)*cos(theta)
+
+            // Gaussian envelope along the beam propagation axis (y')
+            gauss_y := exp(-pow(y_i, 2) / (4*a_2))
+
+            // Rectangular aperture window along the transverse axis (x')
+            rect := heaviside(-x_i + antWidth/2) * heaviside(x_i + antWidth/2)
+
+            // Quadrature (sin) and in-phase (cos) spatial components
+            field_1.setVector(i, j, k, vector(stimAmp * sin(k0*x_i) * gauss_y * rect, 0, 0))
+            field_2.setVector(i, j, k, vector(stimAmp * cos(k0*x_i) * gauss_y * rect, 0, 0))
+        }
+    }
+}
+
+// Snapshot the spatial profile of each mask for visual verification
+B_ext.add(field_1,  1)
+Snapshot(B_ext.comp(0))
+B_ext.add(field_1, -1)
+
+B_ext.add(field_2,  1)
+Snapshot(B_ext.comp(0))
+B_ext.add(field_2, -1)
+
+// Restore the static bias field after snapshots
+B_ext = vector(0, B0, 0)
+
+
+// -----------------------------------------------------------------------------
+// 8. TIME-DEPENDENT EXCITATION (Gaussian wavepacket)
+// -----------------------------------------------------------------------------
+
+// The temporal envelope is a Gaussian centred at t_centre = 1500·T₀.
+// Delaying the packet centre well into the run ensures:
+//   (a) the system is fully relaxed before the packet arrives, and
+//   (b) there is sufficient time after the packet passes to observe the
+//       free eigenmode ring-down in the resonator (500·T₀ tail window).
+//
+// Combined excitation:
+//   Bx = stimAmp · cos(k₀·x' − ωt) · exp(−(t − 1500·T₀)² / 4b₁)
+//
+// The very small b₁ (narrow frequency bandwidth) makes the temporal envelope
+// long, so the wavepacket spans many oscillation periods.
+
+t0         := 1 / f0              // Oscillation period T₀ [s] ≈ 57.5 ps
+t_centre   := 1500 * t0           // Wavepacket temporal centre [s] ≈ 86.2 ns
+
+B_ext.add(field_1, sin(omega*t) * exp(-pow(t - t_centre, 2) / (4*b_1)))
+B_ext.add(field_2, cos(omega*t) * exp(-pow(t - t_centre, 2) / (4*b_1)))
+
+
+// -----------------------------------------------------------------------------
+// 9. SOLVER SETTINGS AND RUN
+// -----------------------------------------------------------------------------
+
+// Time-step bounds sized for reliable integration at f₀.
+MaxDt  = 1/f0 / 10    // Maximum time step [s] ≈ 5.7 ps
+MinDt  = 1/f0 / 200   // Minimum time step [s] ≈ 290 fs
+MaxErr = 0.05e-6       // Per-step magnetisation error tolerance
+
+// Total run: 2500 oscillation periods.
+// The wavepacket arrives near t = 1500·T₀, so this gives:
+//   ~1500·T₀ of quiet pre-packet baseline
+//   ~1000·T₀ of post-packet ring-down for eigenmode analysis
+sim_time := 2500 * t0
+
+// Save mx once per oscillation period.
+// This captures the envelope evolution of the wavepacket and the subsequent
+// slow decay of the resonator eigenmode amplitude over the full run.
+autosnapshot(m.comp(0), t0)
+autosave(m.comp(0), t0)
+
+run(sim_time)

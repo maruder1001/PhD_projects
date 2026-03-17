@@ -1,0 +1,266 @@
+// ============================================================
+// Mumax3 Simulation: Spin-Wave (SW) Dispersion Relation
+// Edge Mode Dispersion — Higher Modes with Antenna Excitation
+// Grid: 128 x 1024 x 5 cells | Cell size: 5x5x2 nm
+// ============================================================
+
+
+// ============================================================
+// SECTION 1: GRID AND GEOMETRY SETUP
+// ============================================================
+
+// Number of simulation cells along each axis
+Nx := 128
+Ny := 1024
+Nz := 5
+
+// Physical size of each cell [m]
+cx := 5e-09   // cell size in x-direction: 5 nm
+cy := 5e-09   // cell size in y-direction: 5 nm
+cz := 2e-09   // cell size in z-direction: 2 nm
+
+// Set the simulation grid dimensions and cell sizes
+setgridsize(Nx, Ny, Nz)
+setcellsize(cx, cy, cz)
+
+// Disable edge smoothing (sharp geometry boundaries)
+EdgeSmooth = 0
+
+// Apply periodic boundary conditions along y-axis only
+// (0 = no PBC in x, 1 = PBC in y, 0 = no PBC in z)
+SetPBC(0, 1, 0)
+
+// Use Dormand-Prince RK45 adaptive solver (solver type 6)
+setsolver(6)
+
+
+// ============================================================
+// SECTION 2: GEOMETRY DEFINITION
+// ============================================================
+
+// Define a rectangular cuboid spanning the full simulation volume
+square1 := cuboid(Nx*cx, Ny*cy, Nz*cz)
+
+// Assign the cuboid to magnetic region 1
+defregion(1, square1)
+
+// Apply the geometry to the simulation
+setgeom(square1)
+
+// Save snapshots of geometry and region maps for verification
+Snapshot(geom)
+Snapshot(regions)
+
+
+// ============================================================
+// SECTION 3: MATERIAL PARAMETERS (YIG-like ferromagnet)
+// ============================================================
+
+Ms_1   := 800e03   // Saturation magnetization [A/m] — typical for YIG
+Aex_1  := 13e-12   // Exchange stiffness constant [J/m]
+Dind_1 := 0e-3     // Dzyaloshinskii-Moriya interaction constant [J/m²] — disabled (DMI = 0)
+
+// Print the gyromagnetic ratio (sanity check)
+print(GammaLL)
+
+// Assign material parameters to region 1
+Msat.SetRegion(1, Ms_1)
+Aex.SetRegion(1, Aex_1)
+Dind.SetRegion(1, Dind_1)
+
+
+// ============================================================
+// SECTION 4: EXTERNAL BIAS FIELD AND INITIAL MAGNETIZATION
+// ============================================================
+
+// Small tilt added to break perfect symmetry and aid convergence
+addition := 1e-6
+
+// Applied bias field magnitude [T]
+B0 := 0.3
+
+// External field along x with tiny y-component to break symmetry
+B_ext = vector(B0, addition, 0)
+
+// Initialize uniform magnetization along x (with tiny y tilt)
+m = uniform(1, addition, 0)
+
+
+// ============================================================
+// SECTION 5: ABSORBING BOUNDARY CONDITIONS (ABC) — DISABLED
+// ============================================================
+// The following block implements a graded damping profile near
+// the boundaries to absorb spin waves and prevent reflections.
+// Currently commented out; only uniform damping (alpha0) is used.
+
+alpha0 := 0.00042   // Uniform Gilbert damping constant (low loss, YIG-like)
+grad    := 25       // Number of gradient steps for damping ramp
+gr_step := 5        // Spatial step size for each damping layer [cells]
+
+// Initialize empty spatial ranges (placeholders for ABC regions)
+grad_up    := yrange(1, 0)
+grad_down  := yrange(1, 0)
+grad_left  := xrange(1, 0)
+grad_right := xrange(1, 0)
+grad0      := xrange(1, 0)
+
+// --- Commented-out ABC loop ---
+// Loops over 'grad' layers near each boundary, defining sub-regions
+// with quadratically increasing damping: alpha = alpha0 + 0.5*((i-3)/grad)^2
+// This prevents spin-wave reflection at the simulation edges.
+//
+// for i:=2; i<(grad+2); i++{
+//
+//     grad_up = yrange( ( (Ny*cy/2)-gr_step*(grad)*cx+i*gr_step*cx),
+//                     ( (Ny*cy/2)-gr_step*(grad)*cy+gr_step*(i+1)*cy) )
+//     grad_down  = yrange( (-(Ny*cy/2)+gr_step*(grad)*cy-gr_step*(i+1)*cy),
+//                     (-(Ny*cy/2)+gr_step*(grad)*cy-gr_step*i*cy) )
+//     grad_left = xrange( (-(Nx*cx/2)+gr_step*(grad)*cx-gr_step*(i+1)*cx),
+//                     (-(Nx*cx/2)+gr_step*(grad)*cx-gr_step*i*cx) )
+//     // grad_right = xrange(((Nx * cx / 2) - gr_step*(grad)*cx + gr_step*i*cx),
+//     //                 ((Nx * cx / 2) - gr_step*(grad)*cx + gr_step*(i+1)*cx)          )
+//
+//     grad0 = grad_up.add(grad_down.add(grad_left ))
+//     grad0 = grad0.intersect(square1)
+//     DefRegion(i, grad0)
+//
+//     dmp := alpha0 + 0.5*((i-3)/grad)*((i-3)/grad)  // quadratic damping profile
+//     alpha.setRegion(i, dmp)
+//
+//     Msat.SetRegion(i, Ms_1)
+//     Aex.SetRegion( i, Aex_1)
+//     Dind.SetRegion(i, Dind_1)
+// }
+// Snapshot(regions)
+
+
+// Apply uniform damping to both the default (0) and magnetic (1) regions
+alpha.setRegion(0, alpha0)
+alpha.setRegion(1, alpha0)
+
+// Save snapshots of damping and saturation magnetization distributions
+Snapshot(alpha)
+Save(alpha)
+snapshot(Msat)
+snapshot(alpha)
+snapshot(Msat)
+
+
+// ============================================================
+// SECTION 6: STATIC EQUILIBRIUM — ENERGY MINIMIZATION
+// ============================================================
+
+// Stop criterion for the minimizer (energy gradient threshold)
+MinimizerStop = 1e-7
+
+// First minimization pass to reach near-equilibrium
+minimize()
+
+// Set maximum time step for ODE solver
+maxdt = 1e-13
+
+// Run a short dynamic relaxation (100 ps) then minimize again
+// to ensure a well-converged ground state
+run(1e-10)
+minimize()
+
+// Save snapshot of equilibrium magnetization and demagnetization field
+snapshot(m)
+Save(B_demag)
+
+
+// ============================================================
+// SECTION 7: SPIN-WAVE EXCITATION — BROADBAND RF ANTENNA
+// ============================================================
+
+// Excitation amplitude: 1% of the bias field [T]
+stimAmp := 0.01 * B0
+
+// Spatial wavevector cutoff for sinc-shaped excitation profile [rad/m]
+// Excites all k-vectors from 0 to k_cut uniformly
+k_cut := 300e6
+
+// Width of the antenna (excitation region) in x [m]
+well_width := 10e-9  // 10 nm antenna
+
+Bxyz := 0.0
+
+// Create a spatial mask defining the antenna field distribution
+// The mask is a 3D vector field (x, y, z components at each cell)
+mask := newVectorMask(Nx, Ny, Nz)
+
+for i := 0; i < Nx; i++ {
+    for j := 0; j < Ny; j++ {
+
+        // Get physical coordinates of cell (i, j, 0) [m]
+        r := index2coord(i, j, 0)
+        x := r.x()
+        y := r.y()
+        z := r.z()
+
+        // Base sinc profile along y — uniform broadband excitation in k-space
+        Bxyz = stimAmp * sinc(k_cut * y)
+
+        // Add symmetric (cosine) higher-order antenna modes (n = 1..5)
+        // These excite even transverse modes across the antenna width
+        for n := 1; n < 6; n++ {
+            Bxyz = Bxyz + sinc(k_cut*y) * cos( n*2*pi*(x - ((Nx*cx - well_width)/2)) / well_width )
+        }
+
+        // Add asymmetric (sine) higher-order antenna modes (n = 1..5)
+        // These excite odd transverse modes across the antenna width
+        for n := 1; n < 6; n++ {
+            Bxyz = Bxyz + sinc(k_cut*y) * sin( n*2*pi*(x - ((Nx*cx - well_width)/2)) / well_width )
+        }
+
+        // Apply the z-component of the excitation field to the mask
+        mask.setVector(i, j, 0, vector(0, 0, Bxyz))
+    }
+}
+
+// Temporarily add the mask (scaled by B0) to verify the excitation geometry
+B_ext.add(mask, B0)
+snapshot(B_ext.comp(0))   // snapshot of Bx distribution
+snapshot(B_ext.comp(1))   // snapshot of By distribution
+snapshot(B_ext.comp(2))   // snapshot of Bz distribution
+
+// Remove the static test field — actual excitation is time-dependent (see below)
+B_ext.add(mask, -B0)
+
+
+// ============================================================
+// SECTION 8: TIME-DOMAIN SIMULATION — SW DISPERSION MEASUREMENT
+// ============================================================
+
+// Temporal cutoff frequency of the excitation pulse [Hz] — 100 GHz
+f_cut := 100e09
+
+// Time offset for the sinc pulse center [s] — 0.5 ns
+// Ensures the causal pulse starts at t=0
+t00 := 0.5e-9
+
+// Apply the time-dependent sinc pulse excitation:
+// h(t) = mask * sinc(2π·f_cut·(t - t00))
+// This creates a broadband pulse flat in frequency from 0 to f_cut
+B_ext.add(mask, sinc(2*pi*f_cut*(t - t00)))
+
+// Sampling interval for output [s]: Nyquist-limited to 1.25 × f_cut
+t_sampl := 0.5 / (f_cut * 1.25)
+
+// ODE solver time-step limits
+MaxDt = 1/f_cut / 100    // Maximum time step ~ T/100 (fine resolution)
+MinDt = 1/f_cut / 2000   // Minimum time step (prevents solver stagnation)
+MaxErr = 0.05e-06         // Maximum local error tolerance
+
+// Override MaxDt to a fraction of the sampling interval
+MaxDt = t_sampl / 100
+
+// Record the out-of-plane (z) magnetization component at each sampling step
+// Used for post-processing: 2D FFT → SW dispersion relation ω(k)
+autoSnapshot(m.comp(2), t_sampl)
+autosave(m.comp(2), t_sampl)
+autosave(B_ext, t_sampl)
+
+// Run the simulation for 1000 sampling intervals
+// Total time ≈ 1000 × t_sampl — long enough for good frequency resolution
+run(1000 * t_sampl)

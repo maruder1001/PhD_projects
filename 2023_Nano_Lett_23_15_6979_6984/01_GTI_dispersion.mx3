@@ -1,0 +1,249 @@
+// =============================================================================
+// Dispersion Relation of a Magnonic Gires-Tournois Interferometer (GTI)
+// =============================================================================
+//
+// Description:
+//   This script simulates the spin-wave dispersion relation in a magnonic
+//   Gires-Tournois interferometer (GTI) geometry. The structure consists of
+//   a wide ferromagnetic waveguide layer (YIG-like) with a narrower resonator
+//   strip placed on top. Spin waves are excited by a broadband sinc-pulse
+//   field applied at the antenna region, and the magnetisation dynamics are
+//   recorded for subsequent Fourier analysis (f-k dispersion map).
+//
+// Geometry:
+//   - Layer    (region 1): wide continuous film,  Ms = 1200 kA/m  (e.g. YIG)
+//   - Resonator(region 2): narrow strip on top,   Ms =  400 kA/m
+//   - Antenna  (region 3): central 4-cell-wide slab of the resonator
+//                          used as the excitation source
+//
+// Simulation parameters:
+//   - Resonator width : 155 nm
+//   - Applied field   : B0 = 10 mT  (along y, i.e. Damon-Eshbach geometry)
+//   - Excitation      : sinc pulse up to f_cut = 20 GHz,
+//                       k-space window up to k_cut = 150 rad/µm
+//
+// Output:
+//   - m.comp(0)  [mx] saved at each time step → used for 2-D FFT (f vs k)
+//   - Snapshots of geometry, regions, Msat, alpha, B_ext components
+//
+// Usage:
+//   mumax3 01_dispersion_rez_155nm_Ms_400_kA_m.mx3
+//
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 1. SIMULATION GRID
+// -----------------------------------------------------------------------------
+
+Nx := 256     // Number of cells along x (width direction)
+Ny := 2048    // Number of cells along y (propagation direction)
+Nz := 3       // Number of cells along z (thickness direction); 3 layers total
+
+cx := 5e-09   // Cell size along x [m] = 5 nm
+cy := 5e-9    // Cell size along y [m] = 5 nm
+cz := 5e-09   // Cell size along z [m] = 5 nm
+
+setgridsize(Nx, Ny, Nz)
+setcellsize(cx, cy, cz)
+
+// Apply periodic boundary conditions along y (propagation axis) to suppress
+// edge reflections and mimic an effectively infinite waveguide.
+SetPBC(0, 1, 0)
+
+
+// -----------------------------------------------------------------------------
+// 2. GEOMETRY DEFINITION
+// -----------------------------------------------------------------------------
+
+lam_yig := 155e-9   // Resonator strip width [m] = 155 nm
+
+// Layer  (region 1): full-width film occupying the bottom z-layer (z = -cz)
+square1 := cuboid(Nx*cx, Ny*cy, cz).transl(0, 0, -1*cz)
+
+// Resonator (region 2): narrow strip centred along x, at the top z-layer (z = +cz)
+square2 := cuboid(lam_yig, Ny*cy, cz).transl((Nx*cx-lam_yig)/2, 0, 1*cz)
+
+// Antenna (region 3): 4-cell-wide (±2 cells) central section of the resonator
+//   used as a localised excitation point for spin waves
+antenna := yrange(-2*cy, 2*cy).intersect(square2)
+
+// Combined geometry: layer + resonator strip
+g := square1.add(square2)
+
+// Assign region indices and apply geometry
+defregion(1, square1)
+defregion(2, square2)
+defregion(3, antenna)
+setgeom(g)
+
+// Save geometry and region map for inspection
+Snapshot(geom)
+Snapshot(regions)
+
+
+// -----------------------------------------------------------------------------
+// 3. MATERIAL PARAMETERS
+// -----------------------------------------------------------------------------
+
+// --- Layer (region 1) — high-Ms film (e.g. YIG or similar) ---
+Ms_1   := 1200e3   // Saturation magnetisation [A/m]
+Aex_1  := 15e-12   // Exchange stiffness constant [J/m]
+Dind_1 := 0e-3     // Interfacial DMI constant [J/m²] (disabled)
+
+// --- Resonator (regions 2 & 3) — lower-Ms strip ---
+Ms_2   := 400e3    // Saturation magnetisation [A/m]
+Aex_2  := 3.7e-12  // Exchange stiffness constant [J/m]
+Dind_2 := 0e-3     // Interfacial DMI constant [J/m²] (disabled)
+
+// Apply material parameters per region
+Msat.SetRegion(1, Ms_1)
+Aex.SetRegion(1, Aex_1)
+Dind.SetRegion(1, Dind_1)
+
+Msat.SetRegion(2, Ms_2)
+Aex.SetRegion(2, Aex_2)
+Dind.SetRegion(2, Dind_2)
+
+// Region 3 (antenna) shares the same material as the resonator
+Msat.SetRegion(3, Ms_2)
+Aex.SetRegion(3, Aex_2)
+Dind.SetRegion(3, Dind_2)
+
+
+// -----------------------------------------------------------------------------
+// 4. INITIAL CONDITIONS AND EQUILIBRIUM RELAXATION
+// -----------------------------------------------------------------------------
+
+B0 := 10e-3              // Static bias field magnitude [T]
+B_ext = vector(0, B0, 0) // Apply field along y (Damon-Eshbach configuration)
+
+// Slightly tilted initial magnetisation to break symmetry and aid convergence
+m = uniform(0, 1, 0.01)
+
+// Snapshot Msat map before relaxation for reference
+snapshot(Msat)
+
+// Relax to the ground state
+relax()
+
+// Snapshot equilibrium magnetisation
+snapshot(m)
+
+
+// -----------------------------------------------------------------------------
+// 5. DAMPING CONFIGURATION
+// -----------------------------------------------------------------------------
+
+// Low Gilbert damping for all regions to allow long-lived spin-wave propagation
+// (typical for high-quality YIG; used uniformly here for simplicity)
+alpha0 := 0.0005
+
+alpha.setRegion(0, alpha0)
+alpha.setRegion(1, alpha0)
+alpha.setRegion(2, alpha0)
+alpha.setRegion(3, alpha0)
+
+Snapshot(alpha)
+snapshot(Msat)
+
+// Second relaxation after damping is set (ensures a clean starting state)
+relax()
+
+
+// -----------------------------------------------------------------------------
+// 6. SPIN-WAVE EXCITATION MASK (spatial profile)
+// -----------------------------------------------------------------------------
+
+// The excitation is a spatially shaped magnetic field pulse applied via a mask.
+// The mask encodes both the k-space bandwidth (sinc in y) and the spatial
+// harmonics of the resonator (cos/sin terms in x, covering symmetric and
+// asymmetric spin-wave modes up to 5th order).
+
+kcut := 150e6   // Spatial k-space cutoff [rad/m] ≈ 150 rad/µm
+f_cut := 20e9   // Temporal frequency cutoff [Hz] = 20 GHz
+
+Bxyz := 0.0
+mask := newVectorMask(Nx, Ny, Nz)   // Spatial mask: vector field over the grid
+
+for i := 0; i < Nx; i++ {
+    for j := 0; j < Ny; j++ {
+
+        r := index2coord(i, j, 2)   // Physical coordinates of cell (i, j) [m]
+        x := r.x()
+        y := r.y()
+
+        // DC component: sinc envelope in y for broadband k-space excitation
+        Bxyz = 0.5 * sinc(kcut * y)
+
+        // Symmetric modes (cosine harmonics): even spatial symmetry in x
+        for n := 1; n < 6; n++ {
+            Bxyz = Bxyz + sinc(kcut*y) * cos(n * 2*pi * (x - (Nx*cx-lam_yig)/2) / lam_yig)
+        }
+
+        // Asymmetric modes (sine harmonics): odd spatial symmetry in x
+        for n := 1; n < 6; n++ {
+            Bxyz = Bxyz + sinc(kcut*y) * sin(n * 2*pi * (x - (Nx*cx-lam_yig)/2) / lam_yig)
+        }
+
+        // Assign the z-component of the excitation field at this cell
+        mask.setVector(i, j, 2, vector(0, 0, Bxyz))
+    }
+}
+
+
+// -----------------------------------------------------------------------------
+// 7. TIME-DOMAIN EXCITATION PULSE
+// -----------------------------------------------------------------------------
+
+// The time-domain pulse is a sinc function centred at t0, giving a flat
+// frequency spectrum up to f_cut. It is multiplied by the spatial mask.
+t0 := 8 / f_cut   // Pulse delay: centres the sinc at 8 periods [s]
+
+// Add the broadband sinc pulse (spatial mask × temporal sinc)
+B_ext.add(mask, 0.001*B0 * sinc(2*pi*f_cut*(t-t0)))
+
+// Temporarily boost B_ext by B0 to snapshot the spatial mask profile, then restore
+B_ext.add(mask,  B0)
+snapshot(B_ext.comp(0))
+snapshot(B_ext.comp(1))
+snapshot(B_ext.comp(2))
+B_ext.add(mask, -B0)
+
+
+// -----------------------------------------------------------------------------
+// 8. SOLVER SETTINGS
+// -----------------------------------------------------------------------------
+
+// Time-step bounds: ensure sufficient resolution of the highest frequency
+MaxDt = 1/f_cut / 100    // Maximum time step [s] ≈ 500 fs
+MinDt = 1/f_cut / 2000   // Minimum time step [s] ≈ 25 fs
+MaxErr = 0.05e-6          // Maximum per-step error tolerance
+
+// Nyquist-limited sampling interval for dispersion data output
+// (factor 1.1 oversamples slightly beyond f_cut)
+N         := 20                    // Oversampling factor for solver within one output interval
+t_sample  := 0.5 / (f_cut * 1.1)  // Output time step [s] ≈ 22.7 ps
+MaxDt      = t_sample / 20         // Override MaxDt to match output cadence
+
+
+// -----------------------------------------------------------------------------
+// 9. DATA OUTPUT
+// -----------------------------------------------------------------------------
+
+// Save the x-component of magnetisation (mx) at each sampling interval.
+// The resulting time series is used for a 2-D FFT to obtain the f-k dispersion map.
+// Alternatives (commented out) allow cropping to a narrow x-strip to reduce file size.
+
+// autosnapshot(m.comp(0), t_sample)
+// autosave(Cropx(m.comp(0), (Nx/2)-4, (Nx/2)+4), t_sample)
+autosave(m.comp(0), t_sample)
+
+
+// -----------------------------------------------------------------------------
+// 10. RUN
+// -----------------------------------------------------------------------------
+
+// Total simulation time = 1000 sampling intervals
+// This provides 1000 time frames for the FFT, setting the frequency resolution.
+run(1000 * t_sample)
