@@ -6,3 +6,6 @@ ChatGPT and Claude which polished them and added commentary. I hope now the code
 Folders in the repository correspond to follwoing papers:
   1. 2022_APL_Mat_10_9 -> "Magnon spectrum of Bloch hopfion beyond ferromagnetic resonance" APL Materials 10 (9)
   2. 2023_PRB_108_1_014418 -> "Modal approach to modeling spin wave scattering" Physical Review B 108 (1), 014418
+  3. 2023_Nano_Lett_23_15_6979_6984 -> "Magnon-Optic Effects with Spin-Wave Leaky Modes: Tunable Goos-Hänchen Shift and Wood’s Anomaly", Nano Letters 23 (15), 6979-6984
+  4. 2025_Sci_Rep_15_1_5538 -> "Goos–Hänchen shift of inelastically scattered spin-wave beams and cascade nonlinear magnon processes", Scientific Reports 15 (1), 5538
+  5. 2026_arXiv_2512.07713 -> preprint in arXiv repository, arXiv:2512.07713
