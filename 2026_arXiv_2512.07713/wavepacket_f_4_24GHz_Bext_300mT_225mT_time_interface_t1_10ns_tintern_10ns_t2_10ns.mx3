@@ -1,0 +1,461 @@
+// ============================================================
+// Mumax3 simulation: Spin-wave wavepacket scattering at a
+// TEMPORAL interface (abrupt change of external field in time)
+//
+// Physical scenario:
+//   A Gaussian-envelope spin-wave wavepacket is launched in a
+//   Co thin film magnetised at B0_1 = 300 mT.  During propagation
+//   the field is suddenly switched (via a smooth tanh transition)
+//   to B0_2 = 225 mT and then back, forming two temporal
+//   interfaces.  The wavepacket scatters off these interfaces,
+//   producing transmitted and reflected waves — the temporal
+//   analogue of Fresnel reflection at a spatial boundary.
+//
+// Key parameters:
+//   Spin-wave frequency  : f0 ≈ 4.25 GHz
+//   Spin-wave wavenumber : k0 ≈ 48.9 Mrad/m
+//   Pre-interface field  : B0_1 = 300 mT
+//   Post-interface field : B0_2 = 225 mT
+//   Phase 1 (B0_1) duration : t1   = 10 ns
+//   Transition duration      : t_inter = 10 ns (tanh-shaped)
+//   Phase 2 (B0_2) duration : t2   = 10 ns
+//   Second transition back to B0_1 after t2
+// ============================================================
+
+
+// ------------------------------------------------------------
+// STACK GEOMETRY
+// N=1, X=1: single Co monolayer (2 nm thick).
+// See dispersion-relation script for full explanation of N and X.
+// ------------------------------------------------------------
+N := 1  // number of magnetic layers per block
+X := 1  // number of blocks in the superlattice
+
+// ------------------------------------------------------------
+// SIMULATION GRID
+// Nx=10 000 cells × cx=3 nm → 30 µm propagation track.
+// Larger cx (3 nm vs 1 nm in the dispersion script) is acceptable
+// here because only a single k-value is excited; full k-resolution
+// is not required.
+// Ny=1, Nz=1: effectively a 1D magnetic wire (film cross-section).
+// ------------------------------------------------------------
+Nx := 10000  // cells along x (propagation direction)
+Ny := 1      // cells along y (uniform; 1D geometry)
+Nz := N*X    // cells along z (one per magnetic layer)
+cx := 3e-09  // cell size along x: 3 nm
+cy := 3e-09  // cell size along y: 3 nm
+cz := 2e-09  // cell size along z: 2 nm (Co layer thickness)
+
+// PBC: same setup as dispersion script —
+// large RepY models an infinitely wide film; RepX avoids x-edge effects.
+RepX := 2    // PBC replicas along x
+RepY := 1024 // PBC replicas along y (infinite film width)
+RepZ := 0    // no PBC along z (free surfaces)
+
+
+// ------------------------------------------------------------
+// MATERIAL PARAMETERS (identical to dispersion-relation script)
+// Co: Ms = 1420 kA/m, A = 13 pJ/m, D_ind = 0.5 mJ/m²
+// PMA quality factor Qf = 1.1 → Ku computed to match target Q.
+// ------------------------------------------------------------
+// Ms :=  1300e03 * 1.6/3.6  // alternative Ms (commented out)
+eps    := 1             // global scaling factor (1 = nominal values)
+Ms     := eps * 1420e3  // saturation magnetisation: 1420 kA/m
+A      := eps * 13e-12  // exchange stiffness: 13 pJ/m
+Dind_1 := eps * 0.5e-3  // interfacial DMI: 0.5 mJ/m²
+
+Qf := 1.1                           // target PMA quality factor (Q > 1 → PMA > shape)
+Ku := 0.5*mu0*Ms*Ms*(1+(Qf-1)/eps)  // uniaxial anisotropy constant [J/m³]
+
+gammaLL = 176e09  // gyromagnetic ratio: 176 GHz/T (Co)
+
+
+// Diagnostic: print simulation box dimensions
+print( sprintf("system size: %.2f x %.2f x %.4f um3", 1e06*cx*Nx, 1e06*cy*Ny, 1e06*cz*Nz) )
+print( sprintf("system size with PBC: %.2f  x %.2f x %.4f um3", 1e06*cx*Nx*(1+2*repX), 1e06*cy*Ny*(1+2*repY), 1e06*cz*Nz*(1+2*repZ)) )
+
+
+// ------------------------------------------------------------
+// GRID AND PBC SETUP
+// ------------------------------------------------------------
+setgridsize(Nx, Ny, Nz)
+setcellsize(cx, cy, cz)
+SetPBC(RepX, RepY, RepZ)
+EdgeSmooth = 0
+
+// Infinite slab geometry along x (no confinement)
+g := xrange(-inf, inf)
+setgeom(g)
+
+
+// ------------------------------------------------------------
+// LAYER REGION DEFINITION (along z)
+// Same logic as dispersion script: assign one Mumax3 region per
+// magnetic layer.  For N=1 this is just region 1 = the Co layer.
+// ------------------------------------------------------------
+for i := 0; i < N; i++ {
+    reg := yrange(0, 0)
+    print(i)
+    for j := 0; j < X; j++ {
+        reg = reg.add( zrange(-Nz*cz/2+(i+N*j)*cz, -Nz*cz/2+(i+N*j+1)*cz) )
+    }
+    DefRegion(i+1, reg)
+    print( sprintf("z0: %0.1f nm z1: %0.1f nm, step: %.1f nm",
+        (-Nz*cz/2+i*cz)*1e09,
+        (-Nz*cz/2+(i+1)*cz)*1e09,
+        (-Nz*cz/2+i*cz - (-Nz*cz/2+(i+1)*cz))*1e09) )
+}
+
+
+// ------------------------------------------------------------
+// SPATIAL DAMPING REGIONS (along x)
+// The film is divided into N_Regions = 250 equal x-strips,
+// each of width R_x.  Every strip is assigned its own Mumax3
+// region so that material parameters — in particular the damping
+// constant alpha — can be set independently per strip.
+//
+// Currently all strips share the same uniform damping alpha_0 = 0.01.
+// The commented-out term `aa*pow(x, 6)` would add polynomial
+// absorbing boundary layers (PML-like) at the edges to suppress
+// spin-wave reflections from the ends of the track — useful when
+// the wavepacket must not bounce back and interfere with the
+// scattering region.
+// ------------------------------------------------------------
+N_Regions := 250           // number of x-strips for spatially resolved damping
+R_x := Nx*cx/N_Regions     // width of each strip [m]
+
+alpha_0 := 0.01            // uniform damping constant (slightly higher than dispersion script
+                           // to damp residual waves at boundaries)
+aa := 5e28                 // coefficient for optional polynomial PML (currently unused)
+
+for i := 0; i < N_Regions; i++ {
+    reg := xrange(0, 0)
+    reg = reg.add( xrange(-Nx*cx/2+i*R_x, -Nx*cx/2+(i+1)*R_x) )
+    DefRegion(i+1, reg)
+    Aex.SetRegion(i+1, A)               // exchange stiffness
+    Msat.SetRegion(i+1, Ms)             // saturation magnetisation
+    Ku1.SetRegion(i+1, Ku)              // uniaxial anisotropy
+    Dind.SetRegion(i+1, Dind_1)         // interfacial DMI
+    anisU.SetRegion(i+1, vector(0,0,1)) // easy axis: out-of-plane (z)
+    alpha.SetRegion(i+1, alpha_0)       // uniform damping
+    // alpha.SetRegion(i+1, alpha_0 + aa*pow(-Nx*cx/2+(i+0.5)*R_x, 6))
+    // ^ polynomial PML: increases damping steeply near x-edges (commented out)
+}
+
+// Save snapshots of all material parameter maps for verification
+Save(alpha)
+Snapshot(regions)
+Snapshot(alpha)
+Snapshot(Aex)
+Snapshot(Msat)
+Snapshot(Ku1)
+Snapshot(Dind)
+
+
+// Verify PMA quality factor
+Q := 2*Ku/(mu0*Ms*Ms)
+print( sprintf("Q-factor = %0.2f", Q) )
+print( sprintf("zadane Q-factor = %0.2f", Qf) )  // "zadane" = "target" (Polish)
+
+// Full exchange coupling across all layer interfaces (continuous Co film)
+A12_block := 1.0
+for i := 0; i <= N; i++ {
+    ext_ScaleExchange(i, i+1, A12_block)
+}
+
+
+// ------------------------------------------------------------
+// THERMAL NOISE FIELD (pre-computed, currently unused)
+// Gaussian random vector field reserved for optional thermal or
+// broadband noise initialisation (see commented B_ext lines below).
+// ------------------------------------------------------------
+t1  := t
+f1  := 35e09       // reference noise frequency: 35 GHz
+t01 := 3/f1        // three-cycle pulse duration at f1
+thermalNoise := newSlice(3, Nx, Ny, Nz)
+for x := 0; x < Nx; x++ {
+    for y := 0; y < Ny; y++ {
+        for z := 0; z < Nz; z++ {
+            thermalNoise.set(0, x, y, z, 0.01*randNorm())
+            thermalNoise.set(1, x, y, z, 0.01*randNorm())
+            thermalNoise.set(2, x, y, z, 0.01*randNorm())
+        }
+    }
+}
+
+
+// ============================================================
+// SPIN-WAVE ANTENNA DEFINITION
+// A spatially localised, narrowband wavepacket is launched by
+// applying a Gaussian-envelope oscillating field at a fixed
+// position in x.
+// ============================================================
+
+// ------------------------------------------------------------
+// TARGET SPIN-WAVE MODE
+// f0 and k0 are chosen to lie on the dispersion curve at B0_1,
+// i.e. the wavepacket is resonant with the spin-wave mode before
+// the temporal interface.
+// ------------------------------------------------------------
+f0 := 4.2478382277980105*1e9  // carrier frequency: ~4.25 GHz
+k0 := 48.87858878588786*1e6   // carrier wavenumber: ~48.9 Mrad/m
+
+wavelength := abs(2*pi/k0)    // spin-wave wavelength [m]
+print(wavelength*1e9)          // print wavelength in nm
+
+// Antenna width: 20 wavelengths (120λ / 6).
+// A wider antenna → narrower k-spectrum → more monochromatic wavepacket.
+antWidth := (120*wavelength)/6
+
+
+// ------------------------------------------------------------
+// ANTENNA FIELD MASKS: field_1 (sine) and field_2 (cosine)
+// Two quadrature masks are needed to create a unidirectional
+// wavepacket.  Combined as:
+//   field_1 * SW_amp*sin(ωt) + field_2 * SW_amp*cos(ωt)
+// the superposition equals SW_amp * cos(ωt - k0*x), which
+// propagates only in the +x direction (no counter-propagating
+// wave).  The Gaussian envelope in x (gauss_x) localises the
+// antenna spatially and narrows the k-spectrum.
+//
+// x_i is the coordinate relative to the antenna centre.
+// The centre is placed at x = 0 (the middle of the track).
+// ------------------------------------------------------------
+field_1 := newVectorMask(Nx, Ny, Nz)  // sine component of the antenna field
+field_2 := newVectorMask(Nx, Ny, Nz)  // cosine component of the antenna field
+
+for i := 0; i < Nx; i++ {
+    for j := 0; j < Ny; j++ {
+        for k := 0; k < Nz; k++ {
+
+            r := index2coord(i, j, k)  // physical position [m] ("polozenie komorki")
+            x := r.x()
+            y := r.y()
+            z := r.z()
+
+            // Antenna centre at x=0 (offset = (0/4)*Nx*cx = 0)
+            x_i := x - (0/4)*Nx*cx
+
+            // Gaussian spatial envelope centred on the antenna
+            gauss_x := exp( -pow(x_i, 2)/(2*pow(antWidth, 2)) )
+
+            // field_1: out-of-plane (z) component, sine-modulated spatial carrier
+            field_1.setVector(i, j, k, vector(0, 0, sin(k0*x_i)*gauss_x))
+
+            // field_2: out-of-plane (z) component, cosine-modulated spatial carrier
+            field_2.setVector(i, j, k, vector(0, 0, cos(k0*x_i)*gauss_x))
+        }
+    }
+}
+
+
+// ------------------------------------------------------------
+// DIAGNOSTIC SNAPSHOT: visualise the antenna field shape
+// Temporarily add field_1 to B_ext, save snapshots of all
+// components, then remove it to restore the clean field.
+// This confirms the spatial profile of the antenna before
+// the actual simulation begins.
+// ------------------------------------------------------------
+B_ext = vector(0, 1, 1e-6)   // dummy uniform field (just for snapshot)
+B_ext.add(field_1,  1)
+Snapshot(B_ext.comp(0))       // snapshot of Bx (should be zero)
+Snapshot(B_ext.comp(1))       // snapshot of By (uniform bias)
+Snapshot(B_ext.comp(2))       // snapshot of Bz (shows antenna profile)
+B_ext.add(field_1, -1)        // remove field_1 again
+
+
+// ------------------------------------------------------------
+// SOLVER PARAMETERS
+// f_cut1 = 70 GHz sets the ODE solver bandwidth ceiling;
+// MaxDt / MinDt ensure numerical stability and accuracy.
+// (t_sampl and t0 from the broadband version are commented out
+//  since sampling is now controlled by T_period below.)
+// ------------------------------------------------------------
+// t_sampl := 0.5/(f0*1.1)   // (unused) Nyquist sampling for f0
+// t0 := t + 10/f0            // (unused) delay before broadband pulse
+
+f_cut1 := 70e09               // solver frequency ceiling: 70 GHz
+MaxDt = 1/f_cut1 / 10         // max time step ~1.43 ps
+MinDt = 1/f_cut1 / 200        // min time step ~0.071 ps
+MaxErr = 0.1e-06               // relative error tolerance
+
+// Field loop variables (sweep over B0 currently disabled)
+B0 := 1.0    // placeholder; will be overwritten below
+dB := 0.001  // field step [T] for commented-out sweep
+
+// (Table output commented out — rely on m and B_ext autosave instead)
+// TableAdd(Edens_total)
+// TableAddVar(B0*1e03, "B0", "mT")
+// tableautosave(t_sampl)
+
+
+// ============================================================
+// TWO-FIELD TEMPORAL INTERFACE EXPERIMENT
+// ============================================================
+
+// ------------------------------------------------------------
+// FIELD VALUES
+// B0_1: initial (and final) bias field — spin-wave dispersion f(k)
+//        is defined at this field.
+// B0_2: intermediate field during the "inside" window — the
+//        dispersion relation shifts, so the wavepacket with
+//        fixed k0 now lies at a different frequency, producing
+//        temporal transmission and reflection.
+// dB_ext: field step at each temporal interface.
+// ------------------------------------------------------------
+B0_1   := 0.300              // initial external field: 300 mT
+B0_2   := 0.225              // intermediate field: 225 mT
+dB_ext := B0_1 - B0_2        // field change at each interface: 75 mT
+
+
+// ------------------------------------------------------------
+// EQUILIBRIUM INITIALISATION at B0_1
+// Start with magnetisation pointing along y (≈ field direction)
+// with a tiny z-tilt to break symmetry, then energy-minimise.
+// ------------------------------------------------------------
+B0 = B0_1
+m = uniform(0, 1, 1e-6)         // initial magnetisation: mostly along y
+B_ext = vector(0, B0, B0*1e-6)  // external field: B0_1 along y, tiny z component
+minimize()                        // conjugate-gradient energy minimisation
+
+// Save snapshots of the relaxed equilibrium state
+Snapshot(m)
+Snapshot(m.comp(2))  // mz (out-of-plane)
+Snapshot(m.comp(1))  // my (along field)
+Snapshot(m.comp(0))  // mx (transverse)
+
+
+// ------------------------------------------------------------
+// WAVEPACKET PARAMETERS
+// The spin-wave wavepacket is a Gaussian-envelope sinusoidal
+// burst centred at t = t00 (4 carrier periods after t=0).
+// packet_width = T_period gives a wavepacket ~1 carrier cycle wide.
+//
+// SW_amp: field amplitude of the excitation, scaled with B0 to
+//         keep the dynamic range in the linear regime.
+// t_sampl: 8 samples per carrier period → well above Nyquist for f0.
+// MaxDt is tightened to t_sampl/100 for high temporal accuracy
+// during the fast-varying excitation.
+// ------------------------------------------------------------
+SW_amp       := 0.0005*B0      // excitation amplitude [T] (linear regime)
+omega        := 2*pi*f0        // carrier angular frequency [rad/s]
+T_period     := 1/f0           // carrier period [s]
+t00          := 4*T_period     // wavepacket peak time (4 periods after start)
+packet_width := T_period       // Gaussian half-width in time (≈ 1 period → broad k-spectrum)
+                               // Note: a wider packet_width → narrower frequency content
+
+t_sampl := T_period/8          // sampling interval: 8 points per carrier period
+MaxDt    = t_sampl / 100       // tighten max time step to 1/100 of t_sampl
+
+
+// ------------------------------------------------------------
+// STATIC EXTERNAL FIELD MASK
+// field_ext stores the direction of B_ext at every cell.
+// It is used as the spatial part of the time-varying field term
+// below, so that the tanh transition multiplies a uniform
+// vector field (0, 1, B0*1e-6) — i.e., the field switches
+// uniformly across the entire sample simultaneously.
+// This is the hallmark of a TEMPORAL interface (vs spatial):
+// the field changes everywhere at the same time.
+// ------------------------------------------------------------
+field_ext := newVectorMask(Nx, Ny, Nz)
+for j := 0; j < Nx; j++ {
+    field_ext.setVector(j, 0, 0, vector(0, 1, B0*1e-6))
+}
+
+
+// ------------------------------------------------------------
+// TEMPORAL INTERFACE TIMING
+// The experiment has five sequential phases:
+//
+//  ──────────────────────────────────────────────────────
+//   Phase         Duration     Field
+//  ──────────────────────────────────────────────────────
+//   1. Pre-interface  t1_period = 10 ns   B0_1 = 300 mT
+//   2. 1st transition t_inter   = 10 ns   tanh ramp down
+//   3. Intermediate   t2_period = 10 ns   B0_2 = 225 mT
+//   4. 2nd transition t_inter   = 10 ns   tanh ramp up
+//   (implicit, within T_total)
+//  ──────────────────────────────────────────────────────
+//
+// T_total = 2*t1_period + 2*t_inter + t2_period = 50 ns
+//
+// tanh_coeff controls the steepness of the field transition.
+// tanh_coeff = 8/t_inter means the transition spans ~t_inter
+// (the tanh rises from ≈0 to ≈1 over that window).
+// ------------------------------------------------------------
+t1_period := 10e-09   // duration of phase 1 (and end phase): 10 ns
+t_inter   := 10e-9    // duration of each tanh transition: 10 ns
+t2_period := 10e-9    // duration of intermediate (B0_2) phase: 10 ns
+
+t_inter_1 := 0.0      // (reserved) start time of 1st interface (set dynamically via formula)
+t_inter_2 := 0.0      // (reserved) start time of 2nd interface
+
+tanh_coeff := 8/t_inter                           // tanh steepness: 8 e-folds over t_inter
+T_total    := 2*t1_period + 2*t_inter + t2_period  // total simulation time: 50 ns
+
+
+// ============================================================
+// MAIN SIMULATION RUN
+// ============================================================
+
+// Clear any previously added B_ext terms before setting up the final field
+B_ext.RemoveExtraTerms()
+print( sprintf("B0 = %0.1f mT, %.4f T", B0*1e03, B0) )
+filenameformat = sprintf("B0_%0.1f_mT_%%s%%06d", B0*1e03)  // output filename template ("po %% to sa nazwy m i numer pliku" = "after %% these are component name and file index")
+
+// Set the base (static) external field at B0_1
+B_ext = vector(0, B0, B0*1e-6)
+
+// ------------------------------------------------------------
+// TERM 1: TIME-VARYING BIAS FIELD (temporal interfaces)
+// This term creates the two temporal interfaces via two tanh
+// functions with opposite signs:
+//
+//  ΔB(t) = -dB_ext * [tanh(s*(t - t1_period - 0.5*t_inter)) + 1]/2
+//          +dB_ext * [tanh(s*(t - t1_period - 1.5*t_inter - t2_period)) + 1]/2
+//
+// where s = tanh_coeff.
+//
+// First tanh  (centred at t1_period + 0.5*t_inter):
+//   Steps the field DOWN by dB_ext (B0_1 → B0_2) at the 1st interface.
+// Second tanh (centred at t1_period + 1.5*t_inter + t2_period):
+//   Steps the field UP   by dB_ext (B0_2 → B0_1) at the 2nd interface.
+// Combined effect: a rectangular field dip of depth dB_ext and
+// duration ≈ t2_period, smoothed at the edges by tanh transitions.
+// ------------------------------------------------------------
+B_ext.add(field_ext,
+    -1*dB_ext*(tanh( tanh_coeff*( t - t1_period - 0.5*t_inter ) ) + 1)/2
+    +    dB_ext*(tanh( tanh_coeff*( t - t1_period - 1.5*t_inter - t2_period ) ) + 1)/2
+)
+
+// ------------------------------------------------------------
+// TERM 2: SPIN-WAVE WAVEPACKET — sine quadrature component
+// Drives mz with SW_amp * sin(ωt) * Gaussian(t-t00).
+// Combined with Term 3 (cosine quadrature), the two terms
+// produce a unidirectional (+x) Gaussian wavepacket.
+// ------------------------------------------------------------
+B_ext.add(field_1,
+    SW_amp * sin(omega*(t-t00)) * exp( -0.5*pow( (t-t00)/packet_width, 2) )
+)
+
+// ------------------------------------------------------------
+// TERM 3: SPIN-WAVE WAVEPACKET — cosine quadrature component
+// Drives mz with SW_amp * cos(ωt) * Gaussian(t-t00).
+// Together with Term 2: resultant field ∝ cos(ωt - k0*x),
+// which selectively excites the +k0 spin-wave mode only.
+// ------------------------------------------------------------
+B_ext.add(field_2,
+    SW_amp * cos(omega*(t-t00)) * exp( -0.5*pow( (t-t00)/packet_width, 2) )
+)
+
+// ------------------------------------------------------------
+// OUTPUT AND TIME EVOLUTION
+// Save full magnetisation m and the applied field B_ext every
+// t_sampl throughout the entire T_total = 50 ns window.
+// Post-processing: Fourier analysis of m(x,t) reveals the
+// incident, transmitted, and temporally reflected wavepackets.
+// ------------------------------------------------------------
+autosave(m,     t_sampl)  // save magnetisation snapshots
+autosave(B_ext, t_sampl)  // save applied field snapshots (useful to verify the tanh switching)
+run(T_total)               // evolve for the full 50 ns

@@ -1,0 +1,289 @@
+// ============================================================
+// Mumax3 simulation: Spin-wave dispersion relation
+// System: Co thin film (2 nm) with interfacial DMI and uniaxial anisotropy
+// Parameters: Ms = 1420 kA/m, D_ind = 0.5 mJ/m², B_ext = 225 mT
+// Method: Broadband spin-wave spectroscopy via sinc-pulse excitation
+// ============================================================
+
+
+// ------------------------------------------------------------
+// STACK GEOMETRY DEFINITION
+// N  – number of Co/Pt bilayer repetitions within a single block
+// X  – number of such blocks stacked along z
+// Together they allow modelling of multilayer superlattices.
+// For N=1, X=1 the system is a single Co monolayer.
+// ------------------------------------------------------------
+N := 1 // number of magnetic layers (Co/Pt bilayers) per block
+X := 1 // number of blocks in the superlattice stack
+
+// ------------------------------------------------------------
+// SIMULATION GRID
+// Nx x Ny x Nz computational cells.
+// Large Nx (20 000) gives fine k-space resolution along x
+// (the spin-wave propagation direction).
+// Ny = 1 means the geometry is effectively 1D (wire-like),
+// while Nz = N*X covers the full layer thickness.
+// Cell sizes cx, cy, cz set the spatial resolution.
+// ------------------------------------------------------------
+Nx := 20000   // number of cells along x (propagation direction)
+Ny := 1       // number of cells along y (uniform; 1D approximation)
+Nz := N*X     // number of cells along z (one cell per magnetic layer)
+cx := 1e-09   // cell size along x: 1 nm
+cy := 1e-09   // cell size along y: 1 nm (irrelevant for Ny=1)
+cz := 2e-09   // cell size along z: 2 nm (= Co layer thickness)
+
+// ------------------------------------------------------------
+// PERIODIC BOUNDARY CONDITIONS (PBC)
+// RepX, RepY, RepZ define how many times the simulation cell
+// is replicated in each direction to mimic an infinite film.
+// RepX=2 along x ensures no edge effects from spin-wave reflections.
+// RepY=1024 along y models a wide, laterally infinite film.
+// RepZ=0: no PBC along z (open boundary between top/bottom).
+// ------------------------------------------------------------
+RepX := 2    // PBC replicas along x
+RepY := 1024 // PBC replicas along y (effectively infinite film width)
+RepZ := 0    // no PBC along z (free surfaces)
+
+
+// ------------------------------------------------------------
+// MATERIAL PARAMETERS
+// eps is a global scaling factor (1 = use nominal values).
+// Ms  – saturation magnetisation [A/m]
+// A   – exchange stiffness constant [J/m]
+// Dind_1 – interfacial (Dzyaloshinskii–Moriya) DMI constant [J/m²]
+// ------------------------------------------------------------
+// Ms :=  1300e03 * 1.6/3.6 // alternative Ms estimate (commented out)
+eps    := 1           // scaling factor (1 = no rescaling)
+Ms     := eps * 1420e3   // saturation magnetisation: 1420 kA/m (Co)
+A      := eps * 13e-12   // exchange stiffness: 13 pJ/m (Co)
+Dind_1 := eps * 0.5e-3   // interfacial DMI: 0.5 mJ/m²
+
+// ------------------------------------------------------------
+// UNIAXIAL PERPENDICULAR MAGNETIC ANISOTROPY (PMA)
+// Qf is the target quality factor Q = 2*Ku / (mu0*Ms²).
+// Q > 1 means PMA dominates over shape anisotropy → out-of-plane
+// equilibrium is favoured.
+// Ku is back-calculated from Qf so the desired Q is achieved
+// regardless of Ms.
+// ------------------------------------------------------------
+Qf := 1.1                               // target quality factor (PMA > shape anisotropy)
+Ku := 0.5*mu0*Ms*Ms*(1+(Qf-1)/eps)     // uniaxial anisotropy constant [J/m³]
+
+// Gyromagnetic ratio for Co (rad/s/T); standard value for electrons
+gammaLL = 176e09   // gyromagnetic ratio: 176 GHz/T
+
+// ------------------------------------------------------------
+// DIAGNOSTIC OUTPUT: print physical dimensions of the simulation box
+// First line: size of the primary (unreplicated) cell in µm³
+// Second line: effective size including all PBC replicas
+// ------------------------------------------------------------
+print( sprintf("system size: %.2f x %.2f x %.4f um3", 1e06*cx*Nx, 1e06*cy*Ny, 1e06*cz*Nz) )
+print( sprintf("system size with PBC: %.2f  x %.2f x %.4f um3", 1e06*cx*Nx*(1+2*repX), 1e06*cy*Ny*(1+2*repY), 1e06*cz*Nz*(1+2*repZ)) )
+
+
+// ------------------------------------------------------------
+// GRID AND PBC SETUP
+// EdgeSmooth=0 disables interface smoothing (sharp boundaries).
+// ------------------------------------------------------------
+setgridsize(Nx, Ny, Nz)
+setcellsize(cx, cy, cz)
+SetPBC(RepX, RepY, RepZ)
+EdgeSmooth = 0
+
+// Define geometry: infinite slab along x (no lateral confinement)
+g := xrange(-inf, inf)
+setgeom(g)
+
+// ------------------------------------------------------------
+// REGION DEFINITION
+// Each magnetic layer (index i) is assigned a separate Mumax3
+// region (index i+1, since region 0 is vacuum).
+// The loop covers all N layers; for a multilayer (X>1), each
+// layer identity i repeats with period N in z (superlattice).
+// zrange() selects the z-slices belonging to each layer.
+// ------------------------------------------------------------
+for i := 0; i < N; i++ {
+    reg := yrange(0, 0) // start with an empty region (no y-extent needed)
+    print(i)
+    for j := 0; j < X; j++ {
+        // accumulate z-slices from each block that belong to layer i
+        reg = reg.add( zrange(-Nz*cz/2+(i+N*j)*cz, -Nz*cz/2+(i+N*j+1)*cz) )
+    }
+    DefRegion(i+1, reg) // assign region index i+1 to this layer
+    print( sprintf("z0: %0.1f nm z1: %0.1f nm, step: %.1f nm",
+        (-Nz*cz/2+i*cz)*1e09,
+        (-Nz*cz/2+(i+1)*cz)*1e09,
+        (-Nz*cz/2+i*cz - (-Nz*cz/2+(i+1)*cz))*1e09) )
+}
+
+// Save a snapshot of the region map for post-processing verification
+Snapshot(regions)
+
+
+// ------------------------------------------------------------
+// MATERIAL PARAMETER ASSIGNMENT PER REGION
+// Each Co layer (region i+1) receives the same bulk parameters.
+// anisU sets the easy axis along z (out-of-plane), consistent
+// with PMA.
+// ------------------------------------------------------------
+for i := 0; i < N; i++ {
+    Aex.SetRegion(i+1, A)              // exchange stiffness
+    Msat.SetRegion(i+1, Ms)            // saturation magnetisation
+    Ku1.SetRegion(i+1, Ku)             // uniaxial anisotropy constant
+    Dind.SetRegion(i+1, Dind_1)        // interfacial DMI constant
+    anisU.SetRegion(i+1, vector(0,0,1)) // easy axis: out-of-plane (z)
+}
+
+// Verify that the computed Q-factor matches the target
+Q := 2*Ku/(mu0*Ms*Ms)
+print( sprintf("Q-factor = %0.2f", Q) )
+print( sprintf("zadane Q-factor = %0.2f", Qf) )  // "zadane" = "target" (Polish)
+
+// ------------------------------------------------------------
+// INTER-REGION EXCHANGE COUPLING
+// A12_block = 1.0 means full (unscaled) exchange across layer
+// boundaries – appropriate for a continuous Co film with no
+// non-magnetic spacer.
+// The loop runs over all interfaces between adjacent regions.
+// ------------------------------------------------------------
+A12_block := 1.0
+for i := 0; i <= N; i++ {
+    ext_ScaleExchange(i, i+1, A12_block) // set exchange coupling between region i and i+1
+}
+
+
+// ------------------------------------------------------------
+// RANDOM THERMAL NOISE (for initial state, currently unused)
+// A Gaussian random vector field is pre-computed and stored.
+// It was intended to seed a realistic disordered initial state
+// or to add thermal fluctuations to B_ext (see commented lines
+// below). Small amplitude (0.01) keeps magnetisation close to
+// the equilibrium direction.
+// ------------------------------------------------------------
+t1  := t
+f1  := 35e09        // reference frequency for the noise pulse: 35 GHz
+t01 := 3/f1         // pulse half-duration (3 cycles of f1)
+thermalNoise := newSlice(3, Nx, Ny, Nz) // 3-component vector field
+for x := 0; x < Nx; x++ {
+    for y := 0; y < Ny; y++ {
+        for z := 0; z < Nz; z++ {
+            // small random perturbation (σ = 0.01) in all three components
+            thermalNoise.set(0, x, y, z, 0.01*randNorm())
+            thermalNoise.set(1, x, y, z, 0.01*randNorm())
+            thermalNoise.set(2, x, y, z, 0.01*randNorm())
+        }
+    }
+}
+
+
+// ------------------------------------------------------------
+// SINC EXCITATION MASK (spatial part of the broadband pulse)
+// To measure the full dispersion relation in one simulation,
+// a sinc-shaped field pulse is applied.  Its Fourier transform
+// is a rect function that excites all k-vectors uniformly up
+// to the cut-off k_cut = kcut.
+// The mask is a vector field storing sinc(kcut * x) at each cell.
+// Multiplied by the temporal sinc below (B_ext.add), it becomes
+// a space–time separable broadband excitation.
+// ------------------------------------------------------------
+sz   := 1.0          // unused amplitude placeholder
+kcut := 150e6        // spatial cut-off wavenumber: 150 Mrad/m (~42 nm wavelength)
+mask := newVectorMask(Nx, 1, Nz)  // spatial mask field ("maska" = mask in Polish)
+for i := 0; i < Nx; i++ {
+    r    := index2coord(i, 0, 0)  // physical position of cell i [m] ("polozenie komorki")
+    x    := r.x()
+    Bxyz := sinc(kcut*x)          // sinc in k-space → rect in k-space (uniform k excitation)
+    for j := 0; j < Nz; j++ {
+        // sz = (1-0.1*randNorm())  // (commented) random amplitude variation option
+        mask.setVector(i, 0, j, vector(Bxyz, Bxyz, Bxyz)) // same excitation on all components
+    }
+}
+
+
+// ------------------------------------------------------------
+// SOLVER AND SAMPLING PARAMETERS
+// Low damping (alpha = 0.002) preserves spin-wave coherence
+// over the full simulation window, improving frequency resolution.
+//
+// f_cut    – maximum frequency of interest: 12 GHz
+//            (Nyquist: t_sampl < 1/(2*f_cut))
+// t_sampl  – time between saved snapshots (10% margin above Nyquist)
+// t0       – delay before the pulse starts (allows relaxation)
+// f_cut1   – upper bound on the ODE solver bandwidth: 70 GHz
+// MaxDt    – maximum solver time step (10 steps per highest-freq. cycle)
+// MinDt    – minimum solver time step (stability floor)
+// MaxErr   – maximum relative error per step
+// ------------------------------------------------------------
+alpha = 0.002   // Gilbert damping constant (very low → long spin-wave lifetime)
+
+f_cut   := 12e09                // upper analysis frequency: 12 GHz
+t_sampl := 0.5/(f_cut*1.1)     // sampling interval [s] (slightly below Nyquist limit)
+t0      := t + 10/f_cut         // simulation start time after initial relaxation (10 cycles)
+
+f_cut1  := 70e09                // solver frequency ceiling: 70 GHz
+MaxDt   = 1/f_cut1 / 10        // max time step ~ 1.43 ps (10× oversampling at 70 GHz)
+MinDt   = 1/f_cut1 / 200       // min time step ~ 0.071 ps (numerical stability)
+MaxErr  = 0.1e-06               // relative error tolerance per RK step
+
+// ============================================================
+// FIELD SWEEP LOOP (single field point, loop commented out)
+// The outer loop over B0 (external field magnitude) is disabled;
+// only B0 = 225 mT is simulated here.
+// ============================================================
+B0 := 1.0    // field variable initialised (will be set to 0.225 T below)
+dB := 0.001  // field step size [T] (used in the commented sweep loop)
+
+// Output: total energy density and external field value at each time step
+TableAdd(Edens_total)
+TableAddVar(B0*1e03, "B0", "mT")
+tableautosave(t_sampl)
+
+
+// Set external field to 225 mT (out-of-plane + tiny in-plane component
+// to break symmetry and aid convergence of minimize())
+B0 = 0.225
+print( sprintf("B0 = %0.1f mT, %.4f T", B0*1e03, B0) )
+
+// Output filename template: encodes the field value for easy identification
+// %% escapes produce literal "%" in the final sprintf; the rest are
+// the magnetisation component letter and the 6-digit file index.
+filenameformat = sprintf("B0_%0.1f_mT_%%s%%06d", B0*1e03)
+
+// Initialise magnetisation close to out-of-plane (+y ≈ along B,
+// tiny z-component to help energy minimiser)
+m = uniform(0, 1, 1e-6)
+B_ext = vector(0, B0, B0*1e-6)  // external field [T]: mostly along y, tiny z tilt
+minimize()                       // relax to local energy minimum (conjugate-gradient)
+
+// Alternative initialisation with noise pulse (commented out):
+// B_ext.add(thermalNoise, 0.001*sinc(2*pi*f1*(t-t01-t1)))
+// run(2*t01)
+// relax()
+// B_ext = vector(0, B0, 0)
+
+// Save snapshots of the relaxed state before the excitation pulse
+Snapshot(m)          // full magnetisation vector
+Snapshot(m.comp(2))  // mz component (out-of-plane)
+Snapshot(m.comp(1))  // my component (along field)
+Snapshot(m.comp(0))  // mx component (transverse)
+
+// --------------------------------------------------------
+// BROADBAND EXCITATION PULSE
+// Apply the sinc-shaped field mask multiplied by a temporal
+// sinc envelope.  The product sinc(k*x) * sinc(2π*f_cut*(t-t0))
+// excites all (k, f) pairs uniformly within the rectangle
+// |k| < kcut, |f| < f_cut, enabling single-simulation
+// measurement of the full dispersion relation.
+// Amplitude 0.0001 T keeps the response in the linear regime.
+// "czesc przestrzenna razy czesc czasowa" = "spatial part × temporal part" (Polish)
+// --------------------------------------------------------
+B_ext.add(mask, 0.0001*sinc(2*pi*f_cut*(t-t0)))
+
+// Run the simulation: save m every t_sampl for 1000 sampling periods
+// The resulting 4D dataset m(x, z, t) is Fourier-transformed
+// post-hoc to yield the spin-wave dispersion S(k, f).
+autosave(m, t_sampl)
+run(1000*t_sampl)
+
+// Save the final magnetisation state (useful for restart or analysis)
+saveas(m, "m_final")
